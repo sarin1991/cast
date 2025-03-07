@@ -1,8 +1,7 @@
-accelerate launch main.py \
+python main.py \
   --pretrained_model "mistralai/Mistral-7B-Instruct-v0.3" \
-  --config_path "config_mistral_180M.json" \
-  --output_dir "mistral_out_180M_1B" \
-  --dataset_text_field="text" \
+  --config_path "config_cast_8x180m.json" \
+  --output_dir "cast_8x180m" \
   --max_steps=10000 \
   --gradient_checkpointing=True \
   --logging_steps=100 \
@@ -15,5 +14,4 @@ accelerate launch main.py \
   --bf16 True \
   --save_steps 10000 \
   --lr_scheduler_type cosine \
-  --packing True \
-  --model_output_path "mistral_checkpoint_180M_1B"
+  --model_output_path "cast_checkpoint_8x180m"
