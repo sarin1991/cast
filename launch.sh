@@ -1,7 +1,7 @@
 python main.py \
   --pretrained_model "mistralai/Mistral-7B-Instruct-v0.3" \
-  --config_path "config_cast_8x180m.json" \
-  --output_dir "cast_8x180m" \
+  --config_path "config_cast_180m.json" \
+  --output_dir "cast_180m" \
   --max_steps=10000 \
   --gradient_checkpointing=True \
   --logging_steps=100 \
@@ -14,4 +14,4 @@ python main.py \
   --bf16 True \
   --save_steps 10000 \
   --lr_scheduler_type cosine \
-  --model_output_path "cast_checkpoint_8x180m"
+  --model_output_path "cast_checkpoint_180m"
