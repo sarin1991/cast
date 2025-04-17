@@ -3,7 +3,7 @@ from torch.utils.data import IterableDataset
 from datasets import load_dataset
 from transformers import Trainer, AutoTokenizer, TrainingArguments, AutoModelForCausalLM, AutoConfig, DataCollatorForLanguageModeling
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Tuple
 import transformers
 torch.backends.cuda.matmul.allow_tf32=True
 
@@ -59,12 +59,55 @@ class CustomTrainingArguments(TrainingArguments):
     model_output_path: str = field(default=None)
     max_seq_length: int = field(default=8192)
     response_template: str = field(default="[/INST]")
+    initial_sparsity_coefficient: float = field(default=1e-8)
+    sparsity_coefficient_multiplier: float = field(default=1.2)
+    target_sparsity: float = field(default=0.8)
+    
+
+class SparseTrainer(Trainer):
+    def __init__(
+        self,
+        *args,
+        initial_sparsity_coefficient: float = 1e-8,
+        sparsity_coefficient_multiplier: float = 1.2,
+        target_sparsity: float = 0.8,
+        **kwargs,
+    ):
+        super().__init__(*args,**kwargs)
+        self.sparsity_coefficient = initial_sparsity_coefficient
+        self.sparsity_coefficient_multiplier = sparsity_coefficient_multiplier
+        self.target_sparsity = target_sparsity
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+        """
+        How the loss is computed by SparseTrainer.
+        """
+        outputs = model(**inputs)
+        ce_loss = outputs.loss
+        sparse_ratio_local = outputs.sparse_ratio
+        l1_reg_loss = outputs.l1_reg_loss
+
+        # global sparse ratio
+        current_sparsity = self.accelerator.reduce(
+            sparse_ratio_local.to(self.accelerator.device), reduction='mean'
+        )
+
+        if current_sparsity.item()<self.target_sparsity:
+            self.sparsity_coefficient = self.sparsity_coefficient*self.sparsity_coefficient_multiplier
+        else:
+            self.sparsity_coefficient = self.sparsity_coefficient/self.sparsity_coefficient_multiplier
+
+        # total loss
+        loss = ce_loss + self.sparsity_coefficient*l1_reg_loss
+
+        return (loss, outputs) if return_outputs else loss
 
 def main():
     parser = transformers.HfArgumentParser(
         (CustomTrainingArguments)
     )
-    (training_args,) = parser.parse_args_into_dataclasses()
+    parsed_vals: Tuple[CustomTrainingArguments,] = parser.parse_args_into_dataclasses()
+    (training_args,) = parsed_vals
     training_args.gradient_checkpointing_kwargs={"use_reentrant": False}
 
     tokenizer = AutoTokenizer.from_pretrained(training_args.pretrained_model, model_max_length=training_args.max_seq_length,padding_side="right")
@@ -83,6 +126,9 @@ def main():
     model.to('cuda')
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)   
     trainer = Trainer(
+        initial_sparsity_coefficient = training_args.initial_sparsity_coefficient,
+        sparsity_coefficient_multiplier = training_args.sparsity_coefficient_multiplier,
+        target_sparsity = training_args.target_sparsity,
         model=model,
         args=training_args,
         train_dataset=iter_dataset,
