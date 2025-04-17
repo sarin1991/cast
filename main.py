@@ -125,7 +125,7 @@ def main():
         model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model,attn_implementation="flash_attention_2",torch_dtype=torch.bfloat16)
     model.to('cuda')
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)   
-    trainer = Trainer(
+    trainer = SparseTrainer(
         initial_sparsity_coefficient = training_args.initial_sparsity_coefficient,
         sparsity_coefficient_multiplier = training_args.sparsity_coefficient_multiplier,
         target_sparsity = training_args.target_sparsity,
