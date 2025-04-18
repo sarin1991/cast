@@ -84,7 +84,7 @@ class SparseTrainer(Trainer):
         """
         outputs = model(**inputs)
         ce_loss = outputs.loss
-        sparse_ratio_local = outputs.sparse_ratio
+        sparse_ratio_local = outputs.sparse_ratio.mean()
         l1_reg_loss = outputs.l1_reg_loss.mean()
 
         # global sparse ratio
@@ -92,7 +92,7 @@ class SparseTrainer(Trainer):
             sparse_ratio_local.to(self.accelerator.device), reduction='mean'
         )
 
-        if current_sparsity.mean().item()<self.target_sparsity:
+        if current_sparsity.item()<self.target_sparsity:
             self.sparsity_coefficient = self.sparsity_coefficient*self.sparsity_coefficient_multiplier
         else:
             self.sparsity_coefficient = self.sparsity_coefficient/self.sparsity_coefficient_multiplier
