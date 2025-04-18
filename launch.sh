@@ -14,4 +14,7 @@ python main.py \
   --bf16 True \
   --save_steps 10000 \
   --lr_scheduler_type cosine \
+  --initial_sparsity_coefficient 1e-8 \
+  --sparsity_coefficient_multiplier 1.2 \
+  --target_sparsity 0.8 \
   --model_output_path "cast_checkpoint_180m"
