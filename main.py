@@ -1,7 +1,7 @@
 import torch
 from torch.utils.data import IterableDataset
 from datasets import load_dataset
-from transformers import Trainer, AutoTokenizer, TrainingArguments, AutoModelForCausalLM, AutoConfig, DataCollatorForLanguageModeling
+from transformers import Trainer, AutoTokenizer, TrainingArguments, AutoModelForCausalLM, AutoConfig, DataCollatorForLanguageModeling, TrainerCallback
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 import transformers
@@ -64,10 +64,44 @@ class CustomTrainingArguments(TrainingArguments):
     target_sparsity: float = field(default=0.8)
     
 
+class CustomMetricAccumulator:
+    def __init__(self):
+        self.metric_sum = 0.0
+        self.metric_count = 0
+
+    def update(self, value):
+        self.metric_sum += value
+        self.metric_count += 1
+
+    def average(self):
+        if self.metric_count == 0:
+            return 0.0
+        return self.metric_sum / self.metric_count
+
+    def reset(self):
+        self.metric_sum = 0
+        self.metric_count = 0
+
+
+class SparsityMetricCallback(TrainerCallback):
+    def __init__(self,current_sparsity_metric_acc:CustomMetricAccumulator):
+        self.sparsity_sum = 0.0
+        self.sparsity_count = 0
+        self.current_sparsity_metric_acc = current_sparsity_metric_acc
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        # Log the average for this interval and reset accumulator
+        current_sparsity = self.current_sparsity_metric_acc.average()
+        if logs is not None:
+            logs["current_sparsity_metric_acc"] = round(current_sparsity,4)
+        self.current_sparsity_metric_acc.reset()
+
+
 class SparseTrainer(Trainer):
     def __init__(
         self,
         *args,
+        current_sparsity_metric_acc: CustomMetricAccumulator,
         initial_sparsity_coefficient: float = 1e-8,
         sparsity_coefficient_multiplier: float = 1.2,
         target_sparsity: float = 0.8,
@@ -77,6 +111,7 @@ class SparseTrainer(Trainer):
         self.sparsity_coefficient = initial_sparsity_coefficient
         self.sparsity_coefficient_multiplier = sparsity_coefficient_multiplier
         self.target_sparsity = target_sparsity
+        self.current_sparsity_metric_acc = current_sparsity_metric_acc
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """
@@ -91,6 +126,7 @@ class SparseTrainer(Trainer):
         current_sparsity = self.accelerator.reduce(
             sparse_ratio_local.to(self.accelerator.device), reduction='mean'
         )
+        self.current_sparsity_metric_acc.update(current_sparsity.item())
 
         if current_sparsity.item()<self.target_sparsity:
             self.sparsity_coefficient = self.sparsity_coefficient*self.sparsity_coefficient_multiplier
@@ -124,7 +160,8 @@ def main():
     else:
         model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model,attn_implementation="flash_attention_2",torch_dtype=torch.bfloat16)
     model.to('cuda')
-    data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)   
+    data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
+    current_sparsity_metric_acc = CustomMetricAccumulator()
     trainer = SparseTrainer(
         initial_sparsity_coefficient = training_args.initial_sparsity_coefficient,
         sparsity_coefficient_multiplier = training_args.sparsity_coefficient_multiplier,
@@ -134,6 +171,8 @@ def main():
         train_dataset=iter_dataset,
         tokenizer=tokenizer,
         data_collator=data_collator,
+        callbacks=[SparsityMetricCallback(current_sparsity_metric_acc)],
+        current_sparsity_metric_acc=current_sparsity_metric_acc,
     )
     trainer.train()
     trainer.save_model(training_args.model_output_path)
