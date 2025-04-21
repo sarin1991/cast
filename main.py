@@ -116,7 +116,7 @@ def main():
     tokenizer.truncation_side = "left"
 
     train_dataset = load_dataset("HuggingFaceTB/cosmopedia", "web_samples_v1", split="train", streaming=True)
-    iter_dataset = ChunkedIterableDataset(train_dataset, tokenizer, block_size=training_args.per_device_train_batch_size)
+    iter_dataset = ChunkedIterableDataset(train_dataset, tokenizer, block_size=training_args.max_seq_length)
 
     if training_args.config_path:
         config = AutoConfig.from_pretrained(training_args.config_path,attn_implementation="flash_attention_2")
