@@ -83,18 +83,20 @@ class CustomMetricAccumulator:
         self.metric_count = 0
 
 
-class SparsityMetricCallback(TrainerCallback):
-    def __init__(self,current_sparsity_metric_acc:CustomMetricAccumulator):
-        self.sparsity_sum = 0.0
-        self.sparsity_count = 0
-        self.current_sparsity_metric_acc = current_sparsity_metric_acc
+class MetricCallback(TrainerCallback):
+    def __init__(self,metric:CustomMetricAccumulator,metric_name: str, precision: int = 4):
+        self.sum = 0.0
+        self.count = 0
+        self.metric = metric
+        self.metric_name = metric_name
+        self.precision = precision
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         # Log the average for this interval and reset accumulator
-        current_sparsity = self.current_sparsity_metric_acc.average()
+        metric = self.metric.average()
         if logs is not None:
-            logs["current_sparsity_metric_acc"] = round(current_sparsity,4)
-        self.current_sparsity_metric_acc.reset()
+            logs[self.metric_name] = round(metric,self.precision)
+        self.metric.reset()
 
 
 class SparseTrainer(Trainer):
@@ -102,6 +104,9 @@ class SparseTrainer(Trainer):
         self,
         *args,
         current_sparsity_metric_acc: CustomMetricAccumulator,
+        l1_reg_loss_metric: CustomMetricAccumulator,
+        ce_loss_metric: CustomMetricAccumulator,
+        sparsity_coefficient_metric: CustomMetricAccumulator,
         initial_sparsity_coefficient: float = 1e-8,
         sparsity_coefficient_multiplier: float = 1.2,
         target_sparsity: float = 0.8,
@@ -112,6 +117,9 @@ class SparseTrainer(Trainer):
         self.sparsity_coefficient_multiplier = sparsity_coefficient_multiplier
         self.target_sparsity = target_sparsity
         self.current_sparsity_metric_acc = current_sparsity_metric_acc
+        self.l1_reg_loss_metric = l1_reg_loss_metric
+        self.ce_loss_metric = ce_loss_metric
+        self.sparsity_coefficient_metric = sparsity_coefficient_metric
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """
@@ -119,19 +127,27 @@ class SparseTrainer(Trainer):
         """
         outputs = model(**inputs)
         ce_loss = outputs.loss
+        self.ce_loss_metric.update(ce_loss.item())
         sparse_ratio_local = outputs.sparse_ratio.mean()
         l1_reg_loss = outputs.l1_reg_loss.mean()
 
         # global sparse ratio
         current_sparsity = self.accelerator.reduce(
             sparse_ratio_local.to(self.accelerator.device), reduction='mean'
-        )
-        self.current_sparsity_metric_acc.update(current_sparsity.item())
+        ).item()
+        self.current_sparsity_metric_acc.update(current_sparsity)
 
-        if current_sparsity.item()<self.target_sparsity:
+        # global l1_reg_loss
+        global_l1_reg_loss = self.accelerator.reduce(
+            l1_reg_loss.to(self.accelerator.device), reduction='mean'
+        ).item()
+        self.l1_reg_loss_metric.update(global_l1_reg_loss)
+
+        if current_sparsity<self.target_sparsity:
             self.sparsity_coefficient = self.sparsity_coefficient*self.sparsity_coefficient_multiplier
         else:
             self.sparsity_coefficient = self.sparsity_coefficient/self.sparsity_coefficient_multiplier
+        self.sparsity_coefficient_metric.update(self.sparsity_coefficient)
 
         # total loss
         loss = ce_loss + self.sparsity_coefficient*l1_reg_loss
@@ -155,13 +171,16 @@ def main():
     iter_dataset = ChunkedIterableDataset(train_dataset, tokenizer, block_size=training_args.max_seq_length)
 
     if training_args.config_path:
-        config = AutoConfig.from_pretrained(training_args.config_path,attn_implementation="flash_attention_2")
-        model = AutoModelForCausalLM.from_config(config,attn_implementation="flash_attention_2",torch_dtype=torch.bfloat16)
+        config = AutoConfig.from_pretrained(training_args.config_path,attn_implementation="sdpa")
+        model = AutoModelForCausalLM.from_config(config,attn_implementation="sdpa",torch_dtype=torch.bfloat16)
     else:
-        model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model,attn_implementation="flash_attention_2",torch_dtype=torch.bfloat16)
+        model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model,attn_implementation="sdpa",torch_dtype=torch.bfloat16)
     model.to('cuda')
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
     current_sparsity_metric_acc = CustomMetricAccumulator()
+    l1_reg_loss_metric = CustomMetricAccumulator()
+    ce_loss_metric = CustomMetricAccumulator()
+    sparsity_coefficient_metric = CustomMetricAccumulator()
     trainer = SparseTrainer(
         initial_sparsity_coefficient = training_args.initial_sparsity_coefficient,
         sparsity_coefficient_multiplier = training_args.sparsity_coefficient_multiplier,
@@ -171,8 +190,14 @@ def main():
         train_dataset=iter_dataset,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        callbacks=[SparsityMetricCallback(current_sparsity_metric_acc)],
+        callbacks=[MetricCallback(current_sparsity_metric_acc,metric_name='sparsity'),
+                   MetricCallback(l1_reg_loss_metric,metric_name='l1_reg_loss'),
+                   MetricCallback(ce_loss_metric,metric_name='ce_loss'),
+                   MetricCallback(sparsity_coefficient_metric,metric_name='sparsity_coefficient',precision=8)],
         current_sparsity_metric_acc=current_sparsity_metric_acc,
+        l1_reg_loss_metric=l1_reg_loss_metric,
+        ce_loss_metric=ce_loss_metric,
+        sparsity_coefficient_metric=sparsity_coefficient_metric,
     )
     trainer.train()
     trainer.save_model(training_args.model_output_path)
