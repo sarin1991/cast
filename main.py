@@ -61,7 +61,8 @@ class CustomTrainingArguments(TrainingArguments):
     response_template: str = field(default="[/INST]")
     initial_sparsity_coefficient: float = field(default=1e-8)
     sparsity_coefficient_multiplier: float = field(default=1.2)
-    target_sparsity: float = field(default=0.8)
+    l1_target_act: float = field(default=0.4)
+    l2_target_act: float = field(default=0.4)
     
 
 class CustomMetricAccumulator:
@@ -103,23 +104,32 @@ class SparseTrainer(Trainer):
     def __init__(
         self,
         *args,
-        current_sparsity_metric_acc: CustomMetricAccumulator,
+        l1_act_metric: CustomMetricAccumulator,
         l1_reg_loss_metric: CustomMetricAccumulator,
+        l2_act_metric: CustomMetricAccumulator,
+        l2_reg_loss_metric: CustomMetricAccumulator,
         ce_loss_metric: CustomMetricAccumulator,
-        sparsity_coefficient_metric: CustomMetricAccumulator,
+        l1_sparsity_coefficient_metric: CustomMetricAccumulator,
+        l2_sparsity_coefficient_metric: CustomMetricAccumulator,
         initial_sparsity_coefficient: float = 1e-8,
         sparsity_coefficient_multiplier: float = 1.2,
-        target_sparsity: float = 0.8,
+        l1_target_act: float = 0.4,
+        l2_target_act: float = 0.4,
         **kwargs,
     ):
         super().__init__(*args,**kwargs)
-        self.sparsity_coefficient = initial_sparsity_coefficient
+        self.l1_sparsity_coefficient = initial_sparsity_coefficient
+        self.l2_sparsity_coefficient = initial_sparsity_coefficient
         self.sparsity_coefficient_multiplier = sparsity_coefficient_multiplier
-        self.target_sparsity = target_sparsity
-        self.current_sparsity_metric_acc = current_sparsity_metric_acc
+        self.l1_target_act = l1_target_act
+        self.l2_target_act = l2_target_act
+        self.l1_act_metric = l1_act_metric
         self.l1_reg_loss_metric = l1_reg_loss_metric
+        self.l2_act_metric = l2_act_metric
+        self.l2_reg_loss_metric = l2_reg_loss_metric
         self.ce_loss_metric = ce_loss_metric
-        self.sparsity_coefficient_metric = sparsity_coefficient_metric
+        self.l1_sparsity_coefficient_metric = l1_sparsity_coefficient_metric
+        self.l2_sparsity_coefficient_metric = l2_sparsity_coefficient_metric
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """
@@ -128,29 +138,45 @@ class SparseTrainer(Trainer):
         outputs = model(**inputs)
         ce_loss = outputs.loss
         self.ce_loss_metric.update(ce_loss.item())
-        sparse_ratio_local = outputs.sparse_ratio.mean()
+        l1_act_local = outputs.l1_act_ratio.mean()
         l1_reg_loss = outputs.l1_reg_loss.mean()
+        l2_act_local = outputs.l2_act_ratio.mean()
+        l2_reg_loss = outputs.l2_reg_loss.mean()
 
-        # global sparse ratio
-        current_sparsity = self.accelerator.reduce(
-            sparse_ratio_local.to(self.accelerator.device), reduction='mean'
+        # global act ratio
+        l1_act = self.accelerator.reduce(
+            l1_act_local.to(self.accelerator.device), reduction='mean'
         ).item()
-        self.current_sparsity_metric_acc.update(current_sparsity)
+        self.l1_act_metric.update(l1_act)
+        l2_act = self.accelerator.reduce(
+            l2_act_local.to(self.accelerator.device), reduction='mean'
+        ).item()
+        self.l2_act_metric.update(l2_act)
 
         # global l1_reg_loss
         global_l1_reg_loss = self.accelerator.reduce(
             l1_reg_loss.to(self.accelerator.device), reduction='mean'
         ).item()
         self.l1_reg_loss_metric.update(global_l1_reg_loss)
+        # global l2_reg_loss
+        global_l2_reg_loss = self.accelerator.reduce(
+            l2_reg_loss.to(self.accelerator.device), reduction='mean'
+        ).item()
+        self.l2_reg_loss_metric.update(global_l2_reg_loss)
 
-        if current_sparsity<self.target_sparsity:
-            self.sparsity_coefficient = self.sparsity_coefficient*self.sparsity_coefficient_multiplier
+        if l1_act>self.l1_target_act:
+            self.l1_sparsity_coefficient = self.l1_sparsity_coefficient*self.sparsity_coefficient_multiplier
         else:
-            self.sparsity_coefficient = self.sparsity_coefficient/self.sparsity_coefficient_multiplier
-        self.sparsity_coefficient_metric.update(self.sparsity_coefficient)
+            self.l1_sparsity_coefficient = self.l1_sparsity_coefficient/self.sparsity_coefficient_multiplier
+        self.l1_sparsity_coefficient_metric.update(self.l1_sparsity_coefficient)
+        if l2_act>self.l2_target_act:
+            self.l2_sparsity_coefficient = self.l2_sparsity_coefficient*self.sparsity_coefficient_multiplier
+        else:
+            self.l2_sparsity_coefficient = self.l2_sparsity_coefficient/self.sparsity_coefficient_multiplier
+        self.l2_sparsity_coefficient_metric.update(self.l2_sparsity_coefficient)
 
         # total loss
-        loss = ce_loss + self.sparsity_coefficient*l1_reg_loss
+        loss = ce_loss + self.l1_sparsity_coefficient*l1_reg_loss + self.l2_sparsity_coefficient*l2_reg_loss
 
         return (loss, outputs) if return_outputs else loss
 
@@ -177,27 +203,38 @@ def main():
         model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model,attn_implementation="sdpa",torch_dtype=torch.bfloat16)
     model.to('cuda')
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
-    current_sparsity_metric_acc = CustomMetricAccumulator()
+    l1_act_metric = CustomMetricAccumulator()
     l1_reg_loss_metric = CustomMetricAccumulator()
+    l2_act_metric = CustomMetricAccumulator()
+    l2_reg_loss_metric = CustomMetricAccumulator()
     ce_loss_metric = CustomMetricAccumulator()
-    sparsity_coefficient_metric = CustomMetricAccumulator()
+    l1_sparsity_coefficient_metric = CustomMetricAccumulator()
+    l2_sparsity_coefficient_metric = CustomMetricAccumulator()
     trainer = SparseTrainer(
         initial_sparsity_coefficient = training_args.initial_sparsity_coefficient,
         sparsity_coefficient_multiplier = training_args.sparsity_coefficient_multiplier,
-        target_sparsity = training_args.target_sparsity,
+        l1_target_act = training_args.l1_target_act,
+        l2_target_act = training_args.l2_target_act,
         model=model,
         args=training_args,
         train_dataset=iter_dataset,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        callbacks=[MetricCallback(current_sparsity_metric_acc,metric_name='sparsity'),
+        callbacks=[MetricCallback(l1_act_metric,metric_name='l1_act'),
                    MetricCallback(l1_reg_loss_metric,metric_name='l1_reg_loss'),
+                   MetricCallback(l2_act_metric,metric_name='l2_act'),
+                   MetricCallback(l2_reg_loss_metric,metric_name='l2_reg_loss'),
                    MetricCallback(ce_loss_metric,metric_name='ce_loss'),
-                   MetricCallback(sparsity_coefficient_metric,metric_name='sparsity_coefficient',precision=8)],
-        current_sparsity_metric_acc=current_sparsity_metric_acc,
+                   MetricCallback(l1_sparsity_coefficient_metric,metric_name='l1_sparsity_coefficient_metric',precision=8),
+                   MetricCallback(l2_sparsity_coefficient_metric,metric_name='l2_sparsity_coefficient_metric',precision=8),
+                   ],
+        l1_act_metric=l1_act_metric,
         l1_reg_loss_metric=l1_reg_loss_metric,
+        l2_act_metric=l2_act_metric,
+        l2_reg_loss_metric=l2_reg_loss_metric,
         ce_loss_metric=ce_loss_metric,
-        sparsity_coefficient_metric=sparsity_coefficient_metric,
+        l1_sparsity_coefficient_metric=l1_sparsity_coefficient_metric,
+        l2_sparsity_coefficient_metric=l2_sparsity_coefficient_metric,
     )
     trainer.train()
     trainer.save_model(training_args.model_output_path)
