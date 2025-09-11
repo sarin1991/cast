@@ -16,6 +16,5 @@ python main.py \
   --lr_scheduler_type cosine \
   --initial_sparsity_coefficient 1e-8 \
   --sparsity_coefficient_multiplier 1.2 \
-  --l1_target_act 0.4 \
   --l2_target_act 0.4 \
   --model_output_path "cast3_checkpoint_180m"

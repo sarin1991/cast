@@ -61,7 +61,6 @@ class CustomTrainingArguments(TrainingArguments):
     response_template: str = field(default="[/INST]")
     initial_sparsity_coefficient: float = field(default=1e-8)
     sparsity_coefficient_multiplier: float = field(default=1.2)
-    l1_target_act: float = field(default=0.4)
     l2_target_act: float = field(default=0.4)
     
 
@@ -185,7 +184,6 @@ def main():
     trainer = SparseTrainer(
         initial_sparsity_coefficient = training_args.initial_sparsity_coefficient,
         sparsity_coefficient_multiplier = training_args.sparsity_coefficient_multiplier,
-        l1_target_act = training_args.l1_target_act,
         l2_target_act = training_args.l2_target_act,
         model=model,
         args=training_args,
