@@ -155,6 +155,7 @@ class SparseTrainer(Trainer):
         self.l2_reg_loss_metric = l2_reg_loss_metric
         self.ce_loss_metric = ce_loss_metric
         self.l2_sparsity_coefficient_metric = l2_sparsity_coefficient_metric
+        self.min_sparsity_coefficient = 1e-12
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """
@@ -187,9 +188,9 @@ class SparseTrainer(Trainer):
         )
 
         if l2_act>current_target:
-            self.l2_sparsity_coefficient = self.l2_sparsity_coefficient*self.sparsity_coefficient_multiplier
+            self.l2_sparsity_coefficient = min((0.5 * ce_loss.item()) / l2_reg_loss.item(), self.l2_sparsity_coefficient * self.sparsity_coefficient_multiplier)
         else:
-            self.l2_sparsity_coefficient = self.l2_sparsity_coefficient/self.sparsity_coefficient_multiplier
+            self.l2_sparsity_coefficient = max(self.min_sparsity_coefficient, self.l2_sparsity_coefficient / self.sparsity_coefficient_multiplier)
         self.l2_sparsity_coefficient_metric.update(self.l2_sparsity_coefficient)
 
         # total loss

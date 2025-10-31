@@ -15,7 +15,7 @@ python main.py \
   --save_steps 10000 \
   --lr_scheduler_type cosine \
   --initial_sparsity_coefficient 1e-8 \
-  --sparsity_coefficient_multiplier 1.2 \
+  --sparsity_coefficient_multiplier 1.05 \
   --l2_target_low 0.2 \
   --l2_target_high 0.8 \
   --l2_target_cycle_length 2000 \
