@@ -1,7 +1,7 @@
 python main.py \
   --pretrained_model "mistralai/Mistral-7B-Instruct-v0.3" \
   --config_path "config_cast_180m.json" \
-  --output_dir "cast3_180m" \
+  --output_dir "cast_180m" \
   --max_steps=10000 \
   --gradient_checkpointing=True \
   --logging_steps=100 \
@@ -16,5 +16,8 @@ python main.py \
   --lr_scheduler_type cosine \
   --initial_sparsity_coefficient 1e-8 \
   --sparsity_coefficient_multiplier 1.2 \
-  --l2_target_act 0.4 \
-  --model_output_path "cast3_checkpoint_180m"
+  --l2_target_low 0.2 \
+  --l2_target_high 0.8 \
+  --l2_target_cycle_length 2000 \
+  --l2_target_dense_ratio 0.1 \
+  --model_output_path "cast_checkpoint_180m"

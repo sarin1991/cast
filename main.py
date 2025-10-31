@@ -5,7 +5,33 @@ from transformers import Trainer, AutoTokenizer, TrainingArguments, AutoModelFor
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 import transformers
+import math
 torch.backends.cuda.matmul.allow_tf32=True
+
+def l2_target_scheduler(step, cycle_length=2000,
+                        low_target=0.2, high_target=0.6,
+                        dense_ratio=0.1):
+    cycle_num = step // cycle_length
+    position = step % cycle_length
+
+    dense_steps = int(cycle_length * dense_ratio)
+    half_dense = dense_steps / 2
+
+    if position < dense_steps:
+        if position < half_dense:
+            if cycle_num == 0:
+                return high_target
+            else:
+                normalized = position / half_dense
+                ramp = (1 - math.cos(math.pi * normalized)) / 2
+                return low_target + (high_target - low_target) * ramp
+        else:
+            position_in_second_half = position - half_dense
+            normalized = position_in_second_half / half_dense
+            ramp = (1 - math.cos(math.pi * normalized)) / 2
+            return high_target + (low_target - high_target) * ramp
+    else:
+        return low_target
 
 class ChunkedIterableDataset(IterableDataset):
     def __init__(self, dataset, tokenizer, block_size=512):
@@ -61,7 +87,10 @@ class CustomTrainingArguments(TrainingArguments):
     response_template: str = field(default="[/INST]")
     initial_sparsity_coefficient: float = field(default=1e-8)
     sparsity_coefficient_multiplier: float = field(default=1.2)
-    l2_target_act: float = field(default=0.4)
+    l2_target_low: float = field(default=0.2)
+    l2_target_high: float = field(default=0.6)
+    l2_target_cycle_length: int = field(default=2000)
+    l2_target_dense_ratio: float = field(default=0.1)
     
 
 class CustomMetricAccumulator:
@@ -109,13 +138,19 @@ class SparseTrainer(Trainer):
         l2_sparsity_coefficient_metric: CustomMetricAccumulator,
         initial_sparsity_coefficient: float = 1e-8,
         sparsity_coefficient_multiplier: float = 1.2,
-        l2_target_act: float = 0.4,
+        l2_target_low: float = 0.2,
+        l2_target_high: float = 0.6,
+        l2_target_cycle_length: int = 2000,
+        l2_target_dense_ratio: float = 0.1,
         **kwargs,
     ):
         super().__init__(*args,**kwargs)
         self.l2_sparsity_coefficient = initial_sparsity_coefficient
         self.sparsity_coefficient_multiplier = sparsity_coefficient_multiplier
-        self.l2_target_act = l2_target_act
+        self.l2_target_low = l2_target_low
+        self.l2_target_high = l2_target_high
+        self.l2_target_cycle_length = l2_target_cycle_length
+        self.l2_target_dense_ratio = l2_target_dense_ratio
         self.l2_act_metric = l2_act_metric
         self.l2_reg_loss_metric = l2_reg_loss_metric
         self.ce_loss_metric = ce_loss_metric
@@ -143,7 +178,15 @@ class SparseTrainer(Trainer):
         ).item()
         self.l2_reg_loss_metric.update(global_l2_reg_loss)
 
-        if l2_act>self.l2_target_act:
+        current_target = l2_target_scheduler(
+            step=self.state.global_step,
+            cycle_length=self.l2_target_cycle_length,
+            low_target=self.l2_target_low,
+            high_target=self.l2_target_high,
+            dense_ratio=self.l2_target_dense_ratio
+        )
+
+        if l2_act>current_target:
             self.l2_sparsity_coefficient = self.l2_sparsity_coefficient*self.sparsity_coefficient_multiplier
         else:
             self.l2_sparsity_coefficient = self.l2_sparsity_coefficient/self.sparsity_coefficient_multiplier
@@ -184,7 +227,10 @@ def main():
     trainer = SparseTrainer(
         initial_sparsity_coefficient = training_args.initial_sparsity_coefficient,
         sparsity_coefficient_multiplier = training_args.sparsity_coefficient_multiplier,
-        l2_target_act = training_args.l2_target_act,
+        l2_target_low = training_args.l2_target_low,
+        l2_target_high = training_args.l2_target_high,
+        l2_target_cycle_length = training_args.l2_target_cycle_length,
+        l2_target_dense_ratio = training_args.l2_target_dense_ratio,
         model=model,
         args=training_args,
         train_dataset=iter_dataset,
