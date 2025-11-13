@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Tuple
 import transformers
 import math
+import deepspeed
 torch.backends.cuda.matmul.allow_tf32=True
 
 def l2_target_scheduler(step, cycle_length=2000,
@@ -214,12 +215,25 @@ def main():
     train_dataset = load_dataset("HuggingFaceTB/cosmopedia", "web_samples_v1", split="train", streaming=True)
     iter_dataset = ChunkedIterableDataset(train_dataset, tokenizer, block_size=training_args.max_seq_length)
 
-    if training_args.config_path:
-        config = AutoConfig.from_pretrained(training_args.config_path,attn_implementation="sdpa")
-        model = AutoModelForCausalLM.from_config(config,attn_implementation="sdpa",torch_dtype=torch.bfloat16)
+    # Optimized model initialization for DeepSpeed ZeRO Stage 3
+    if training_args.deepspeed is not None:
+        # Use DeepSpeed's zero.Init() for efficient ZeRO-3 initialization
+        # This avoids materializing the full model in memory
+        with deepspeed.zero.Init(config_dict_or_path=training_args.deepspeed):
+            if training_args.config_path:
+                config = AutoConfig.from_pretrained(training_args.config_path,attn_implementation="sdpa")
+                model = AutoModelForCausalLM.from_config(config,attn_implementation="sdpa",torch_dtype=torch.bfloat16)
+            else:
+                model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model,attn_implementation="sdpa",torch_dtype=torch.bfloat16)
+        # DeepSpeed handles device placement automatically, no need for model.to('cuda')
     else:
-        model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model,attn_implementation="sdpa",torch_dtype=torch.bfloat16)
-    model.to('cuda')
+        # Standard initialization without DeepSpeed
+        if training_args.config_path:
+            config = AutoConfig.from_pretrained(training_args.config_path,attn_implementation="sdpa")
+            model = AutoModelForCausalLM.from_config(config,attn_implementation="sdpa",torch_dtype=torch.bfloat16)
+        else:
+            model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model,attn_implementation="sdpa",torch_dtype=torch.bfloat16)
+        model.to('cuda')
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
     l2_act_metric = CustomMetricAccumulator()
     l2_reg_loss_metric = CustomMetricAccumulator()
