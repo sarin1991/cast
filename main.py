@@ -3,10 +3,10 @@ from torch.utils.data import IterableDataset
 from datasets import load_dataset
 from transformers import Trainer, AutoTokenizer, TrainingArguments, AutoModelForCausalLM, AutoConfig, DataCollatorForLanguageModeling, TrainerCallback
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Tuple
 import transformers
 import math
-import deepspeed
+from accelerate import init_empty_weights
 torch.backends.cuda.matmul.allow_tf32=True
 
 def l2_target_scheduler(step, cycle_length=2000,
@@ -217,15 +217,13 @@ def main():
 
     # Optimized model initialization for DeepSpeed ZeRO Stage 3
     if training_args.deepspeed is not None:
-        # Use DeepSpeed's zero.Init() for efficient ZeRO-3 initialization
-        # This avoids materializing the full model in memory
-        with deepspeed.zero.Init(config_dict_or_path=training_args.deepspeed):
+        # Initialize model on meta device (no memory allocation)
+        with init_empty_weights():
             if training_args.config_path:
-                config = AutoConfig.from_pretrained(training_args.config_path,attn_implementation="sdpa")
-                model = AutoModelForCausalLM.from_config(config,attn_implementation="sdpa",torch_dtype=torch.bfloat16)
+                config = AutoConfig.from_pretrained(training_args.config_path, attn_implementation="sdpa")
+                model = AutoModelForCausalLM.from_config(config, attn_implementation="sdpa", torch_dtype=torch.bfloat16)
             else:
-                model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model,attn_implementation="sdpa",torch_dtype=torch.bfloat16)
-        # DeepSpeed handles device placement automatically, no need for model.to('cuda')
+                model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model, attn_implementation="sdpa", torch_dtype=torch.bfloat16)
     else:
         # Standard initialization without DeepSpeed
         if training_args.config_path:
