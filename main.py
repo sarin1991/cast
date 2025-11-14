@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 from typing import Tuple
 import transformers
 import math
-from accelerate import init_empty_weights
+import json
+import deepspeed
 torch.backends.cuda.matmul.allow_tf32=True
 
 def l2_target_scheduler(step, cycle_length=2000,
@@ -217,8 +218,20 @@ def main():
 
     # Optimized model initialization for DeepSpeed ZeRO Stage 3
     if training_args.deepspeed is not None:
-        # Initialize model on meta device (no memory allocation)
-        with init_empty_weights():
+        # Read the full config and extract only what zero.Init needs
+        with open(training_args.deepspeed, 'r') as f:
+            full_config = json.load(f)
+        
+        # Create minimal config for zero.Init with required batch size
+        zero_init_config = {
+            "train_micro_batch_size_per_gpu": 1,  # Dummy value, Trainer will override
+            "zero_optimization": full_config.get("zero_optimization", {}),
+            "bf16": full_config.get("bf16", {}),
+            "fp16": full_config.get("fp16", {})
+        }
+        
+        # Use config_dict_or_path parameter (not deprecated 'config')
+        with deepspeed.zero.Init(config_dict_or_path=zero_init_config):
             if training_args.config_path:
                 config = AutoConfig.from_pretrained(training_args.config_path, attn_implementation="sdpa")
                 model = AutoModelForCausalLM.from_config(config, attn_implementation="sdpa", torch_dtype=torch.bfloat16)
