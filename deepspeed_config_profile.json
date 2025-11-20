@@ -9,7 +9,8 @@
       "lr": "auto",
       "betas": "auto",
       "eps": "auto",
-      "weight_decay": "auto"
+      "weight_decay": "auto",
+      "fp32_optimizer_states": false
     }
   },
   "zero_optimization": {
@@ -52,6 +53,12 @@
     "top_modules": 3,
     "detailed": true,
     "output_file": "deepspeed_flops_profile.txt"
+  },
+  "memory_breakdown": true,
+  "tensorboard": {
+    "enabled": true,
+    "output_path": "./logs/tensorboard",
+    "job_name": "cast_training"
   },
   "steps_per_print": 100,
   "wall_clock_breakdown": true
