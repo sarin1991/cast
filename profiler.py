@@ -165,6 +165,6 @@ if __name__ == "__main__":
     parser.add_argument("--warmup", type=int, default=2, help="Warm-up iterations (not profiled)")
     parser.add_argument("--profile_memory", action="store_true", help="Profile memory allocation")
     parser.add_argument("--random_gates", action="store_true", help="Use random gates instead of learned gates")
-    parser.add_argument("--gate_sparsity", type=float, default=0.1, help="Sparsity for random gates (fraction active, e.g., 0.1 = 10%%)")
+    parser.add_argument("--gate_sparsity", type=float, default=0.1, help="Sparsity for random gates (fraction inactive, e.g., 0.1 = 10%%)")
     args = parser.parse_args()
     main(args)
