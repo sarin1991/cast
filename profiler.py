@@ -112,7 +112,7 @@ def main(args):
         
         # Create single random gate module and replace all gates
         random_gate = RandomSparseGate(config, args.gate_sparsity).to(device)
-        for layer in model.layers:
+        for layer in model.model.layers:
             layer.mlp.l2_gate_proj = random_gate
     
     # Optional warm-up
