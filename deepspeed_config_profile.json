@@ -54,12 +54,6 @@
     "detailed": true,
     "output_file": "deepspeed_flops_profile.txt"
   },
-  "memory_breakdown": true,
-  "tensorboard": {
-    "enabled": true,
-    "output_path": "./logs/tensorboard",
-    "job_name": "cast_training"
-  },
   "steps_per_print": 100,
   "wall_clock_breakdown": true
 }
