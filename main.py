@@ -10,6 +10,13 @@ import json
 import deepspeed
 torch.backends.cuda.matmul.allow_tf32=True
 
+def get_zero_stage(deepspeed_config_path):
+    if deepspeed_config_path is None:
+        return 0
+    with open(deepspeed_config_path, 'r') as f:
+        ds_config = json.load(f)
+    return ds_config.get("zero_optimization", {}).get("stage", 0)
+
 def l2_target_scheduler(step, cycle_length=2000,
                         low_target=0.2, high_target=0.6,
                         dense_ratio=0.1):
@@ -216,8 +223,9 @@ def main():
     train_dataset = load_dataset("HuggingFaceTB/cosmopedia", "web_samples_v1", split="train", streaming=True)
     iter_dataset = ChunkedIterableDataset(train_dataset, tokenizer, block_size=training_args.max_seq_length)
 
+    zero_stage = get_zero_stage(training_args.deepspeed)
     # Optimized model initialization for DeepSpeed ZeRO Stage 3
-    if training_args.deepspeed is not None:
+    if zero_stage == 3:
         # Read the full config and extract only what zero.Init needs
         with open(training_args.deepspeed, 'r') as f:
             full_config = json.load(f)
