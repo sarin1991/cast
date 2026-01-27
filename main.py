@@ -1,13 +1,15 @@
 import torch
 from torch.utils.data import IterableDataset
 from datasets import load_dataset
-from transformers import Trainer, AutoTokenizer, TrainingArguments, AutoModelForCausalLM, AutoConfig, DataCollatorForLanguageModeling, TrainerCallback
+from transformers import Trainer, AutoTokenizer, TrainingArguments, AutoModelForCausalLM, AutoConfig, DataCollatorForLanguageModeling, TrainerCallback, get_cosine_schedule_with_warmup
 from dataclasses import dataclass, field
 from typing import Tuple
 import transformers
 import math
 import json
 import deepspeed
+from optimizers.layerwise_muon import LayerwiseMuonOptimizer
+from optimizers.hooks import attach_multi_param_opt_hook, attach_clear_grad_after_accumulate # Update usages to new modules as needed
 torch.backends.cuda.matmul.allow_tf32=True
 
 def get_zero_stage(deepspeed_config_path):
@@ -224,6 +226,7 @@ def main():
     iter_dataset = ChunkedIterableDataset(train_dataset, tokenizer, block_size=training_args.max_seq_length)
 
     zero_stage = get_zero_stage(training_args.deepspeed)
+    optimizers = (None, None)
     # Optimized model initialization for DeepSpeed ZeRO Stage 3
     if zero_stage == 3:
         # Read the full config and extract only what zero.Init needs
@@ -253,6 +256,64 @@ def main():
         else:
             model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model,attn_implementation="sdpa",torch_dtype=torch.bfloat16)
         model.to('cuda')
+    
+        # --- 2. Partition Model Parameters ---
+        mlp_params_by_layer = []
+        params_dict = {}
+        for decoder_layer in model.model.layers:
+            mlp_params = []
+            for name, param in decoder_layer.named_parameters():
+                if "up_proj" in name or "down_proj" in name:
+                    print(name)
+                    params_dict[name] = 1
+                    mlp_params.append(param)
+            mlp_params_by_layer.append(mlp_params)
+        other_params = []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            if not name in params_dict:
+                other_params.append(param)
+
+        print(f"Found {len(mlp_params)} parameters for Low Rank Optimizer and {len(other_params)} for AdamW.")
+
+        # --- 3. Create the Two Optimizers ---
+        # Note: You need bitsandbytes installed for the 8-bit optimizer.
+        layerwise_muon_optimizers = []
+        for mlp_params in mlp_params_by_layer:
+            muon_param_groups = [
+                {
+                    'params': mlp_params,
+                }
+            ]
+
+            muon_optimizer = LayerwiseMuonOptimizer(
+                muon_param_groups,
+                lr=training_args.learning_rate,
+            )
+            attach_multi_param_opt_hook(mlp_params, muon_optimizer)
+            for param in mlp_params:
+                attach_clear_grad_after_accumulate(param)
+            layerwise_muon_optimizers.append(muon_optimizer)
+
+        all_mlp_params = []
+        for mlp_params in mlp_params_by_layer:
+            all_mlp_params.extend(mlp_params)
+
+        adamw_optimizer = torch.optim.AdamW(
+            other_params,
+            lr=training_args.learning_rate, # Also controlled by the scheduler
+        )
+
+        # --- Create the Cosine Scheduler ---
+        # The scheduler will control the learning rate for BOTH optimizers.
+        cosine_scheduler = get_cosine_schedule_with_warmup(
+            optimizer=adamw_optimizer,
+            num_warmup_steps=training_args.warmup_steps,
+            num_training_steps=training_args.max_steps,
+        )
+        optimizers=(adamw_optimizer, cosine_scheduler)
+
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
     l2_act_metric = CustomMetricAccumulator()
     l2_reg_loss_metric = CustomMetricAccumulator()
@@ -268,7 +329,7 @@ def main():
         model=model,
         args=training_args,
         train_dataset=iter_dataset,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
         callbacks=[
                    MetricCallback(l2_act_metric,metric_name='l2_act'),
@@ -280,6 +341,7 @@ def main():
         l2_reg_loss_metric=l2_reg_loss_metric,
         ce_loss_metric=ce_loss_metric,
         l2_sparsity_coefficient_metric=l2_sparsity_coefficient_metric,
+        optimizers=optimizers,
     )
     trainer.train()
     trainer.save_model(training_args.model_output_path)
