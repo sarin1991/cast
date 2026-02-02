@@ -275,7 +275,7 @@ def main():
             if not name in params_dict:
                 other_params.append(param)
 
-        print(f"Found {len(mlp_params)} parameters for Low Rank Optimizer and {len(other_params)} for AdamW.")
+        print(f"Found {len(mlp_params_by_layer)} parameters for Low Rank Optimizer and {len(other_params)} for AdamW.")
 
         # --- 3. Create the Two Optimizers ---
         # Note: You need bitsandbytes installed for the 8-bit optimizer.

@@ -76,7 +76,7 @@ class LayerwiseMuonOptimizer(MuonOptimizer):
     Fill in the logic in future work.
     """
     def __init__(self, param_groups, **kwargs):
-        super().__init__(param_groups, defaults=kwargs)
+        super().__init__(param_groups, **kwargs)
     
     @torch.no_grad()
     def step_from_grads(self, params, grads):
