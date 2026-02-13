@@ -8,7 +8,7 @@ import transformers
 import math
 import json
 import deepspeed
-from optimizers.layerwise_muon import LayerwiseMuonOptimizer
+from optimizers.layerwise_low_rank_muon import LayerwiseLowRankMuonOptimizer as LayerwiseMuonOptimizer
 from optimizers.hooks import attach_multi_param_opt_hook, attach_clear_grad_after_accumulate # Update usages to new modules as needed
 torch.backends.cuda.matmul.allow_tf32=True
 

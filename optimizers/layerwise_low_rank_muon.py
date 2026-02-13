@@ -20,30 +20,28 @@ def decompress(P: torch.Tensor, X_lr: torch.Tensor):
 
 
 @torch.no_grad()
-def low_rank_projection_block_iteration(M: torch.Tensor, M_lr_prev: torch.Tensor):
+def low_rank_projection_block_iteration(P: torch.Tensor, M: torch.Tensor, M_lr: torch.Tensor):
     """
     One warm-started block iteration that updates the low rank projection matrix.
 
     Inputs:
+      P:      (m, r) projection matrix
       M:      (m, n) fp32
-      M_lr_prev: (r, n) previous low rank momentum
+      M_lr: (r, n) low rank momentum
 
     Returns:
-      P_new: (m, r) fp32 (new projection matrix)
-      M_lr_new: (r, n) fp32 (new low rank momentum)
+      None # inplace updates P & M_lr
     """
     m, n = M.shape
-    r, _ = M_lr_prev.shape
+    r, _ = M_lr.shape
 
-    Q_prev = _orthonormalize_columns(M_lr_prev.T)  # (n, r)
+    r_buf = torch.empty((r,r),device=P.device,dtype=P.dtype)
+    q_buf = torch.empty((n,r),device=P.device,dtype=P.dtype)
 
-    # Update P via one subspace iteration step: P <- orth(M Q_prev)
-    P_new = _orthonormalize_columns(M @ Q_prev)  # (m, r)
-
+    torch.linalg.qr(M_lr.T, mode="reduced",out=(q_buf,r_buf)) # q = (n,r)
+    torch.linalg.qr(M @ q_buf, mode="reduced",out=(P,r_buf)) # q = (m,r)
     # Store new low rank momentum
-    M_lr_new = P_new.T @ M  # (r, n)
-
-    return P_new, M_lr_new
+    torch.matmul(P.T, M, out=M_lr)  # (r, n)
 
 
 def zeropower_via_newtonschulz5(G, steps: int):
@@ -75,28 +73,14 @@ def zeropower_via_newtonschulz5(G, steps: int):
     return X
 
 
-@torch.no_grad()
 def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
-    """
-    Computes Muon update and returns (update, momentum_new).
-
-    Requirements (per your request):
-      - No in-place ops for `update` (and we also avoid in-place ops on `grad`).
-      - `momentum` is NOT modified in-place either; we return a new momentum tensor.
-
-    grad:     tensor shaped like parameter (2D here)
-    momentum: tensor shaped like parameter (2D here)
-    """
-    # momentum_new = beta*momentum + (1-beta)*grad
-    momentum_new = momentum * beta + grad * (1.0 - beta)
-
-    # Nesterov-style blend: update_pre = (1-beta)*grad + beta*momentum_new
-    update_pre = grad * (1.0 - beta) + momentum_new * beta if nesterov else momentum_new
-
-    update = zeropower_via_newtonschulz5(update_pre, steps=ns_steps)
-    update = update * (max(1.0, update.size(-2) / update.size(-1)) ** 0.5)
-
-    return update, momentum_new
+    momentum.lerp_(grad, 1 - beta)
+    update = grad.lerp_(momentum, beta) if nesterov else momentum
+    if update.ndim == 4: # for the case of conv filters
+        update = update.view(len(update), -1)
+    update = zeropower_via_newtonschulz5(update, steps=ns_steps)
+    update *= max(1, update.size(-2) / update.size(-1))**0.5
+    return update
 
 
 class LowRankMuonOptimizer(torch.optim.Optimizer):
@@ -121,7 +105,7 @@ class LowRankMuonOptimizer(torch.optim.Optimizer):
                     # continue
                     p.grad = torch.zeros_like(p)  # Force synchronization
                 state = self.state[p]
-                gradient = p.grad.detach()
+                gradient = p.grad.detach().float()
                 m, n = gradient.shape
                 initialized = True
                 if len(state) == 0:
@@ -132,21 +116,19 @@ class LowRankMuonOptimizer(torch.optim.Optimizer):
                     state["momentum_buffer_low_rank"] = momentum_buffer_low_rank_init
                     state["weight_residual"] = torch.zeros_like(momentum_buffer_low_rank_init)
                     initialized = False
-                projection_matrix = state["projection_matrix"]
-                momentum_low_rank = state["momentum_buffer_low_rank"]
                 if initialized:
-                    momentum = decompress(projection_matrix, momentum_low_rank)
+                    momentum = decompress(state["projection_matrix"], state["momentum_buffer_low_rank"])
                 else:
                     momentum = torch.zeros_like(p,dtype=torch.float32)
-                update, momentum_new = muon_update(gradient, momentum, beta=group["momentum"])
-                projection_matrix_new, momentum_low_rank_new = low_rank_projection_block_iteration(momentum_new, momentum_low_rank)
-                W_master = (p.float() + projection_matrix @ state["weight_residual"]) * (1 - group["lr"] * group["weight_decay"])
-                W_master.add_(update.reshape(W_master.shape), alpha=-group["lr"])
-                state["projection_matrix"] = projection_matrix_new
-                state["momentum_buffer_low_rank"] = momentum_low_rank_new
-                p.copy_(W_master.to(p.dtype))
-                weight_residual_new = W_master - p.float()
-                state["weight_residual"].copy_(projection_matrix_new.T @ weight_residual_new)
+                update = muon_update(gradient, momentum, beta=group["momentum"])
+                decay = (1 - group["lr"] * group["weight_decay"])
+                W = p.float()
+                W.addmm_( state["projection_matrix"], state["weight_residual"], beta=decay, alpha=decay)
+                W.add_(update.reshape(W.shape), alpha=-group["lr"])
+                p.copy_(W)
+                W.sub_(p)
+                low_rank_projection_block_iteration(state["projection_matrix"], momentum, state["momentum_buffer_low_rank"])
+                torch.matmul(state["projection_matrix"].T, W, out=state["weight_residual"])
         return loss
 
 class LayerwiseLowRankMuonOptimizer(LowRankMuonOptimizer):

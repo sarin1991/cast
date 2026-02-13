@@ -2,22 +2,21 @@ python main.py \
   --pretrained_model "mistralai/Mistral-7B-Instruct-v0.3" \
   --config_path "config_cast_180m.json" \
   --output_dir "cast_180m" \
-  --max_steps=10000 \
+  --max_steps=40000 \
   --gradient_checkpointing=True \
   --logging_steps=100 \
-  --evaluation_strategy "no" \
   --save_strategy "steps" \
-  --per_device_train_batch_size "128" \
+  --per_device_train_batch_size 1024 \
   --learning_rate 2e-4 \
   --logging_dir 'logs' \
   --max_seq_length 512 \
   --bf16 True \
-  --save_steps 10000 \
+  --save_steps 40000 \
   --lr_scheduler_type cosine \
   --initial_sparsity_coefficient 1e-8 \
   --sparsity_coefficient_multiplier 1.05 \
-  --l2_target_low 0.2 \
+  --l2_target_low 0.02 \
   --l2_target_high 0.8 \
   --l2_target_cycle_length 2000 \
-  --l2_target_dense_ratio 0.1 \
+  --l2_target_dense_ratio 0.0 \
   --model_output_path "cast_checkpoint_180m"
