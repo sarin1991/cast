@@ -102,8 +102,7 @@ class LowRankMuonOptimizer(torch.optim.Optimizer):
         for group in self.param_groups:
             for p in group["params"]:
                 if p.grad is None:
-                    # continue
-                    p.grad = torch.zeros_like(p)  # Force synchronization
+                    continue
                 state = self.state[p]
                 gradient = p.grad.detach().float()
                 m, n = gradient.shape
@@ -149,6 +148,10 @@ class LayerwiseLowRankMuonOptimizer(LowRankMuonOptimizer):
         """
         for p, g in zip(params, grads):
             if g is None:
-                continue
-            p.grad = g.detach()
-        return self.step()
+                p.grad = None
+            else:
+                p.grad = g.detach()
+        out = self.step()
+        for p in params:
+            p.grad = None
+        return out
