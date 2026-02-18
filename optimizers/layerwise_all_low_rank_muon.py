@@ -66,12 +66,12 @@ class AllLowRankMuonOptimizer(torch.optim.Optimizer):
                 m, n = gradient.shape
                 r = group["momentum_rank"]
                 if len(state) == 0:
-                    projection_matrix_init = torch.randn((gradient.shape[0], r), device=p.device, dtype=torch.bfloat16)
+                    projection_matrix_init = torch.randn((gradient.shape[0], r), device=p.device, dtype=torch.float32)
                     state["projection_matrix"] = _orthonormalize_columns(projection_matrix_init)
-                    momentum_buffer_low_rank_init = torch.randn((r, gradient.shape[1]), device=p.device, dtype=torch.bfloat16)
+                    momentum_buffer_low_rank_init = torch.randn((r, gradient.shape[1]), device=p.device, dtype=torch.float32)
                     state["momentum_buffer_low_rank"] = momentum_buffer_low_rank_init
                     state["weight_residual"] = torch.zeros_like(momentum_buffer_low_rank_init,dtype=torch.float32)
-                    momentum = torch.zeros_like(p,dtype=torch.bfloat16)
+                    momentum = torch.zeros_like(p,dtype=torch.float32)
                 else:
                     momentum = decompress(state["projection_matrix"], state["momentum_buffer_low_rank"])
                 decay = (1 - group["lr"] * group["weight_decay"])
