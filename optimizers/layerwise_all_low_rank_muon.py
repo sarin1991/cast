@@ -84,7 +84,7 @@ class AllLowRankMuonOptimizer(torch.optim.Optimizer):
                 momentum.lerp_(gradient, 1 - beta)
                 update = gradient.lerp_(momentum, beta)
                 low_rank_projection_block_iteration(state["projection_matrix"], momentum, state["momentum_buffer_low_rank"],q_buf,r_buf)
-                torch.linalg.qr(state["projection_matrix"].T @ update, mode="reduced",out=(q_buf,r_buf))
+                torch.linalg.qr(update.T @ state["projection_matrix"], mode="reduced",out=(q_buf,r_buf))
                 torch.matmul(state["projection_matrix"], q_buf.T, out=update)
                 W.add_(update.reshape(W.shape), alpha=-group["lr"])
                 p.copy_(W)
