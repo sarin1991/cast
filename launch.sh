@@ -19,4 +19,6 @@ python main.py \
   --l2_target_high 0.8 \
   --l2_target_cycle_length 2000 \
   --l2_target_dense_ratio 0.0 \
+  --layerwise_optim "layerwise_low_rank_muon" \
+  --layerwise_optim_kwargs '{"rank":128}' \
   --model_output_path "cast_checkpoint_180m"

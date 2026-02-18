@@ -8,7 +8,7 @@ import transformers
 import math
 import json
 import deepspeed
-from optimizers.layerwise_low_rank_muon import LayerwiseLowRankMuonOptimizer as LayerwiseMuonOptimizer
+from optimizers.layerwise_optim_factory import create_layerwise_optimizer
 from optimizers.hooks import attach_multi_param_opt_hook, attach_clear_grad_after_accumulate # Update usages to new modules as needed
 torch.backends.cuda.matmul.allow_tf32=True
 
@@ -102,6 +102,14 @@ class CustomTrainingArguments(TrainingArguments):
     l2_target_high: float = field(default=0.6)
     l2_target_cycle_length: int = field(default=2000)
     l2_target_dense_ratio: float = field(default=0.1)
+    layerwise_optim: str = field(
+        default="none",
+        metadata={"help": "Hook-based layerwise optimizer to use: none, layerwise_low_rank_muon, ..."}
+    )
+    layerwise_optim_kwargs: str = field(
+        default="{}",
+        metadata={"help": "JSON dict of kwargs for the hook optimizer, e.g. '{\"rank\":8}'"}
+    )
     
 
 class CustomMetricAccumulator:
@@ -215,7 +223,7 @@ def main():
     )
     parsed_vals: Tuple[CustomTrainingArguments,] = parser.parse_args_into_dataclasses()
     (training_args,) = parsed_vals
-    training_args.gradient_checkpointing_kwargs={"use_reentrant": False}
+    training_args.gradient_checkpointing_kwargs={"use_reentrant": True}
 
     tokenizer = AutoTokenizer.from_pretrained(training_args.pretrained_model, model_max_length=training_args.max_seq_length,padding_side="right")
     if tokenizer.pad_token_id is None:
@@ -257,62 +265,74 @@ def main():
             model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model,attn_implementation="sdpa",torch_dtype=torch.bfloat16)
         model.to('cuda')
     
-        # --- 2. Partition Model Parameters ---
-        mlp_params_by_layer = []
-        params_dict = {}
-        for decoder_layer in model.model.layers:
-            mlp_params = []
-            for name, param in decoder_layer.named_parameters():
-                if "up_proj" in name or "down_proj" in name:
-                    print(name)
-                    params_dict[name] = 1
-                    mlp_params.append(param)
-            mlp_params_by_layer.append(mlp_params)
-        other_params = []
-        for name, param in model.named_parameters():
-            if not param.requires_grad:
-                continue
-            if not name in params_dict:
-                other_params.append(param)
+        # Custom layerwise optimizer
+        if training_args.layerwise_optim not in (None, "", "none"):
+            # --- Partition Model Parameters (robust: uses param identity, not names) ---
+            mlp_params_by_layer = []
+            mlp_param_ids = set()
 
-        print(f"Found {len(mlp_params_by_layer)} parameters for Low Rank Optimizer and {len(other_params)} for AdamW.")
+            for decoder_layer in model.model.layers:
+                mlp_params = []
+                for name, param in decoder_layer.named_parameters():
+                    if ("up_proj" in name) or ("down_proj" in name):
+                        mlp_params.append(param)
+                        mlp_param_ids.add(id(param))
+                mlp_params_by_layer.append(mlp_params)
 
-        # --- 3. Create the Two Optimizers ---
-        # Note: You need bitsandbytes installed for the 8-bit optimizer.
-        layerwise_muon_optimizers = []
-        for mlp_params in mlp_params_by_layer:
-            muon_param_groups = [
-                {
-                    'params': mlp_params,
-                }
+            other_params = [
+                p for p in model.parameters()
+                if p.requires_grad and (id(p) not in mlp_param_ids)
             ]
 
-            muon_optimizer = LayerwiseMuonOptimizer(
-                muon_param_groups,
-                lr=training_args.learning_rate,
+            print(
+                f"Found {sum(len(x) for x in mlp_params_by_layer)} params for layerwise optimizer "
+                f"and {len(other_params)} for AdamW."
             )
-            attach_multi_param_opt_hook(mlp_params, muon_optimizer)
-            for param in mlp_params:
-                attach_clear_grad_after_accumulate(param)
-            layerwise_muon_optimizers.append(muon_optimizer)
 
-        all_mlp_params = []
-        for mlp_params in mlp_params_by_layer:
-            all_mlp_params.extend(mlp_params)
+            # --- Create the Two Optimizers ---
+            # Note: You need bitsandbytes installed for the 8-bit optimizer.
+            layerwise_optimizers = []
+            for layer_idx, mlp_params in enumerate(mlp_params_by_layer):
+                if len(mlp_params) != 2:
+                    raise RuntimeError(
+                        f"Layer {layer_idx}: expected 2 params (up_proj/down_proj), found {len(mlp_params)}. "
+                        "Check your name filter or model architecture."
+                    )
 
-        adamw_optimizer = torch.optim.AdamW(
-            other_params,
-            lr=training_args.learning_rate, # Also controlled by the scheduler
-        )
+                param_groups = [
+                    {
+                        'params': mlp_params,
+                    }
+                ]
 
-        # --- Create the Cosine Scheduler ---
-        # The scheduler will control the learning rate for BOTH optimizers.
-        cosine_scheduler = get_cosine_schedule_with_warmup(
-            optimizer=adamw_optimizer,
-            num_warmup_steps=training_args.warmup_steps,
-            num_training_steps=training_args.max_steps,
-        )
-        optimizers=(adamw_optimizer, cosine_scheduler)
+                layerwise_optimizer = create_layerwise_optimizer(
+                    name=training_args.layerwise_optim,
+                    param_groups=param_groups,
+                    lr=training_args.learning_rate,
+                    kwargs_json=training_args.layerwise_optim_kwargs,
+                )
+                attach_multi_param_opt_hook(mlp_params, layerwise_optimizer)
+                for param in mlp_params:
+                    attach_clear_grad_after_accumulate(param)
+                layerwise_optimizers.append(layerwise_optimizer)
+
+            all_mlp_params = []
+            for mlp_params in mlp_params_by_layer:
+                all_mlp_params.extend(mlp_params)
+
+            adamw_optimizer = torch.optim.AdamW(
+                other_params,
+                lr=training_args.learning_rate, # Also controlled by the scheduler
+            )
+
+            # --- Create the Cosine Scheduler ---
+            # The scheduler will control the learning rate for BOTH optimizers.
+            cosine_scheduler = get_cosine_schedule_with_warmup(
+                optimizer=adamw_optimizer,
+                num_warmup_steps=training_args.warmup_steps,
+                num_training_steps=training_args.max_steps,
+            )
+            optimizers=(adamw_optimizer, cosine_scheduler)
 
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
     l2_act_metric = CustomMetricAccumulator()
