@@ -61,7 +61,7 @@ class AllLowRankMuonOptimizer(torch.optim.Optimizer):
                 if p.grad is None:
                     continue
                 state = self.state[p]
-                gradient = p.grad.detach()
+                gradient = p.grad.detach().float()
                 # Shapes
                 m, n = gradient.shape
                 r = group["momentum_rank"]
