@@ -13,8 +13,8 @@ python /workspace/cast/main.py \
   --bf16 True \
   --save_steps 40000 \
   --lr_scheduler_type cosine \
-  --initial_sparsity_coefficient 1e-8 \
-  --sparsity_coefficient_multiplier 1.05 \
+  --initial_sparsity_coefficient 0 \
+  --sparsity_coefficient_multiplier 0 \
   --l2_target_low 1.0 \
   --l2_target_high 1.0 \
   --l2_target_cycle_length 2000 \
