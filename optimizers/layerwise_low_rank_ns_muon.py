@@ -68,7 +68,7 @@ class LowRankNSMuonOptimizer(torch.optim.Optimizer):
                 if len(state) == 0:
                     r = group["momentum_rank"]
                     projection_matrix_init = torch.randn((gradient.shape[0], r), device=p.device, dtype=torch.bfloat16)
-                    state["projection_matrix"] = zeropower_via_newtonschulz5(projection_matrix_init)
+                    state["projection_matrix"] = zeropower_via_newtonschulz5(projection_matrix_init, steps=5)
                     momentum_buffer_low_rank_init = torch.randn((r, gradient.shape[1]), device=p.device, dtype=torch.bfloat16)
                     state["momentum_buffer_low_rank"] = momentum_buffer_low_rank_init
                     state["weight_residual"] = torch.zeros_like(momentum_buffer_low_rank_init,dtype=torch.float32)
@@ -83,11 +83,11 @@ class LowRankNSMuonOptimizer(torch.optim.Optimizer):
                 momentum.lerp_(gradient, 1 - beta)
                 update = gradient.lerp_(momentum, beta)
                 # update projection matrix and momentum low rank
-                q = zeropower_via_newtonschulz5(state["momentum_buffer_low_rank"].T)
-                state["projection_matrix"].copy_(zeropower_via_newtonschulz5(momentum @ q))
+                q = zeropower_via_newtonschulz5(state["momentum_buffer_low_rank"].T, steps=5)
+                state["projection_matrix"].copy_(zeropower_via_newtonschulz5(momentum @ q, steps=5))
                 torch.matmul(state["projection_matrix"].T, momentum, out=state["momentum_buffer_low_rank"])
                 # remove eigen vals for update
-                update_q = zeropower_via_newtonschulz5(state["projection_matrix"].T @ update)
+                update_q = zeropower_via_newtonschulz5(state["projection_matrix"].T @ update, steps=5)
                 update = state["projection_matrix"] @ update_q
                 update *= max(1, update.size(-2) / update.size(-1))**0.5
                 W.add_(update.reshape(W.shape), alpha=-group["lr"])
