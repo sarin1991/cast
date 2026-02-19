@@ -14,7 +14,7 @@ python /workspace/cast/main.py \
   --save_steps 40000 \
   --lr_scheduler_type cosine \
   --initial_sparsity_coefficient 0 \
-  --sparsity_coefficient_multiplier 0 \
+  --sparsity_coefficient_multiplier 1 \
   --l2_target_low 1.0 \
   --l2_target_high 1.0 \
   --l2_target_cycle_length 2000 \
