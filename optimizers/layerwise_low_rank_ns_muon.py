@@ -71,30 +71,32 @@ class LowRankNSMuonOptimizer(torch.optim.Optimizer):
                     state["projection_matrix"] = zeropower_via_newtonschulz5(projection_matrix_init, steps=5)
                     momentum_buffer_low_rank_init = torch.randn((r, gradient.shape[1]), device=p.device, dtype=torch.bfloat16)
                     state["momentum_buffer_low_rank"] = momentum_buffer_low_rank_init
-                    state["weight_residual"] = torch.zeros_like(momentum_buffer_low_rank_init,dtype=torch.float32)
+                    state["low_rank_weight"] = torch.zeros_like(momentum_buffer_low_rank_init,dtype=torch.float32)
                     momentum = torch.zeros_like(p,dtype=torch.bfloat16)
                 else:
                     momentum = decompress(state["projection_matrix"], state["momentum_buffer_low_rank"])
                 decay = (1 - group["lr"] * group["weight_decay"])
-                W = p.float()
-                W.addmm_( state["projection_matrix"].float(), state["weight_residual"], beta=decay, alpha=decay)
                 beta = group["momentum"]
                 # Update momentum
                 momentum.lerp_(gradient, 1 - beta)
                 update = gradient.lerp_(momentum, beta)
+                # build weight
+                W_lr_bf16 = state["projection_matrix"].T @ p
+                p.addmm_(state["projection_matrix"], W_lr_bf16, beta=1.0, alpha=-1.0) # remove low precision lr weights
+                W = p.float() 
+                W.addmm_( state["projection_matrix"].float(), state["low_rank_weight"], beta=decay, alpha=decay) #Add back high precision lr weights
                 # update projection matrix and momentum low rank
                 q = zeropower_via_newtonschulz5(state["momentum_buffer_low_rank"].T, steps=5)
                 state["projection_matrix"].copy_(zeropower_via_newtonschulz5(momentum @ q, steps=5))
                 torch.matmul(state["projection_matrix"].T, momentum, out=state["momentum_buffer_low_rank"])
                 # remove eigen vals for update
                 update_q = zeropower_via_newtonschulz5(state["projection_matrix"].T @ update, steps=5)
-                update = state["projection_matrix"] @ update_q
-                update *= max(1, update.size(-2) / update.size(-1))**0.5
+                s = max(1, update.size(-2) / update.size(-1))**0.5
+                update.addmm_(state["projection_matrix"], update_q, beta=0.0, alpha=s)
                 W.add_(update.reshape(W.shape), alpha=-group["lr"])
                 p.copy_(W)
-                W.sub_(p)
-                # Recalculate residual
-                torch.matmul(state["projection_matrix"].T.float(), W, out=state["weight_residual"])
+                # Recalculate low rank
+                torch.matmul(state["projection_matrix"].T.float(), W, out=state["low_rank_weight"])
         return loss
 
 class LayerwiseLowRankNSMuonOptimizer(LowRankNSMuonOptimizer):
