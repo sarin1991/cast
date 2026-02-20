@@ -15,12 +15,16 @@ from .layerwise_low_rank_muon import (
 from .layerwise_muon import (
     LayerwiseMuonOptimizer
 )
+from .layerwise_adam import (
+    LayerwiseAdamOptimizer
+)
 
 LAYERWISE_OPT_REGISTRY: Dict[str, Type[torch.optim.Optimizer]] = {
     "layerwise_low_rank_ns_muon": LayerwiseLowRankNSMuonOptimizer,
     "layerwise_all_low_rank_muon": LayerwiseAllLowRankMuonOptimizer,
     "layerwise_low_rank_muon": LayerwiseLowRankMuonOptimizer,
     "layerwise_muon": LayerwiseMuonOptimizer,
+    "layerwise_adam": LayerwiseAdamOptimizer,
     # "my_other_opt": MyOtherHookOptimizer,
 }
 
