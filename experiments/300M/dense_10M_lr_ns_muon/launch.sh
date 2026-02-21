@@ -1,0 +1,23 @@
+python /workspace/cast/main.py \
+  --pretrained_model "mistralai/Mistral-7B-Instruct-v0.3" \
+  --config_path "config.json" \
+  --output_dir "dense" \
+  --max_steps=12000 \
+  --gradient_checkpointing=True \
+  --logging_steps=100 \
+  --save_strategy "steps" \
+  --per_device_train_batch_size 1024 \
+  --learning_rate 2e-4 \
+  --logging_dir 'logs' \
+  --max_seq_length 512 \
+  --bf16 True \
+  --save_steps 40000 \
+  --lr_scheduler_type cosine \
+  --initial_sparsity_coefficient 0 \
+  --sparsity_coefficient_multiplier 1 \
+  --l2_target_low 1.0 \
+  --l2_target_high 1.0 \
+  --l2_target_cycle_length 2000 \
+  --l2_target_dense_ratio 1.0 \
+  --layerwise_optim "layerwise_low_rank_ns_muon" \
+  --model_output_path "dense_checkpoint"
