@@ -87,6 +87,10 @@ class LowRankNSMuonOptimizer(torch.optim.Optimizer):
                     continue
                 state = self.state[p]
                 gradient = p.grad.detach().to(torch.bfloat16) # cast in case fp32
+                if p.dtype == torch.float32:
+                    isfloat32 = True
+                else:
+                    isfloat32 = False
                 if len(state) == 0:
                     r = group["momentum_rank"]
                     projection_matrix_init = torch.randn((gradient.shape[0], r), device=p.device, dtype=torch.bfloat16)
@@ -101,11 +105,9 @@ class LowRankNSMuonOptimizer(torch.optim.Optimizer):
                 decay = (1 - group["lr"] * group["weight_decay"])
                 beta = group["momentum"]
                 # build weight
-                if p.dtype == torch.float32:
-                    isfloat32 = True
+                if isfloat32:
                     W = p
                 else:
-                    isfloat32 = False
                     W_lr_bf16 = state["projection_matrix"].T @ p
                     p.addmm_(state["projection_matrix"], W_lr_bf16, beta=1.0, alpha=-1.0) # remove low precision lr weights
                     W = p.float() 
