@@ -21,7 +21,7 @@
     "rope_theta": 1000000.0,
     "sliding_window": null,
     "tie_word_embeddings": false,
-    "dtype": "bfloat16",
+    "mlp_dtype": "float32",
     "transformers_version": "4.42.0.dev0",
     "use_cache": true,
     "vocab_size": 32768
