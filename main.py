@@ -253,16 +253,16 @@ def main():
         with deepspeed.zero.Init(config_dict_or_path=zero_init_config):
             if training_args.config_path:
                 config = AutoConfig.from_pretrained(training_args.config_path, attn_implementation="sdpa")
-                model = AutoModelForCausalLM.from_config(config, attn_implementation="sdpa", torch_dtype=torch.bfloat16)
+                model = AutoModelForCausalLM.from_config(config, attn_implementation="sdpa")
             else:
-                model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model, attn_implementation="sdpa", torch_dtype=torch.bfloat16)
+                model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model, attn_implementation="sdpa")
     else:
         # Standard initialization without DeepSpeed
         if training_args.config_path:
             config = AutoConfig.from_pretrained(training_args.config_path,attn_implementation="sdpa")
-            model = AutoModelForCausalLM.from_config(config,attn_implementation="sdpa",torch_dtype=torch.bfloat16)
+            model = AutoModelForCausalLM.from_config(config,attn_implementation="sdpa")
         else:
-            model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model,attn_implementation="sdpa",torch_dtype=torch.bfloat16)
+            model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model,attn_implementation="sdpa")
         model.to('cuda')
     
         # Custom layerwise optimizer

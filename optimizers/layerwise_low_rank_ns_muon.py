@@ -43,6 +43,28 @@ def zeropower_via_newtonschulz5(G, steps: int):
     return X
 
 
+def copy_stochastic_(target: torch.Tensor, source: torch.Tensor):
+    # thanks to Nerogar for fast stochastic pytorch implementation
+    # https://github.com/pytorch/pytorch/issues/120376#issuecomment-1974828905
+    with torch.no_grad():
+        # create a random 16 bit integer
+        result = torch.randint_like(
+            source,
+            dtype=torch.int32,
+            low=0,
+            high=(1 << 16),
+        )
+
+        # add the random number to the lower 16 bit of the mantissa
+        result.add_(source.view(dtype=torch.int32))
+
+        # mask off the lower 16 bit of the mantissa
+        result.bitwise_and_(-65536)  # -65536 = FFFF0000 as a signed int32
+
+        # copy the higher 16 bit into the target tensor
+        target.copy_(result.view(dtype=torch.float32))
+
+
 class LowRankNSMuonOptimizer(torch.optim.Optimizer):
     """
     Muon variant for usage in non-distributed settings.
@@ -64,27 +86,33 @@ class LowRankNSMuonOptimizer(torch.optim.Optimizer):
                 if p.grad is None:
                     continue
                 state = self.state[p]
-                gradient = p.grad.detach()
+                gradient = p.grad.detach().to(torch.bfloat16) # cast in case fp32
                 if len(state) == 0:
                     r = group["momentum_rank"]
                     projection_matrix_init = torch.randn((gradient.shape[0], r), device=p.device, dtype=torch.bfloat16)
                     state["projection_matrix"] = zeropower_via_newtonschulz5(projection_matrix_init, steps=5)
                     momentum_buffer_low_rank_init = torch.randn((r, gradient.shape[1]), device=p.device, dtype=torch.bfloat16)
                     state["momentum_buffer_low_rank"] = momentum_buffer_low_rank_init
-                    state["low_rank_weight"] = torch.zeros_like(momentum_buffer_low_rank_init,dtype=torch.float32)
                     momentum = torch.zeros_like(p,dtype=torch.bfloat16)
+                    if not isfloat32:
+                        state["low_rank_weight"] = torch.zeros_like(momentum_buffer_low_rank_init,dtype=torch.float32)
                 else:
                     momentum = decompress(state["projection_matrix"], state["momentum_buffer_low_rank"])
                 decay = (1 - group["lr"] * group["weight_decay"])
                 beta = group["momentum"]
+                # build weight
+                if p.dtype == torch.float32:
+                    isfloat32 = True
+                    W = p
+                else:
+                    isfloat32 = False
+                    W_lr_bf16 = state["projection_matrix"].T @ p
+                    p.addmm_(state["projection_matrix"], W_lr_bf16, beta=1.0, alpha=-1.0) # remove low precision lr weights
+                    W = p.float() 
+                    W.addmm_( state["projection_matrix"].float(), state["low_rank_weight"], beta=decay, alpha=decay) #Add back high precision lr weights
                 # Update momentum
                 momentum.lerp_(gradient, 1 - beta)
                 update = gradient.lerp_(momentum, beta)
-                # build weight
-                W_lr_bf16 = state["projection_matrix"].T @ p
-                p.addmm_(state["projection_matrix"], W_lr_bf16, beta=1.0, alpha=-1.0) # remove low precision lr weights
-                W = p.float() 
-                W.addmm_( state["projection_matrix"].float(), state["low_rank_weight"], beta=decay, alpha=decay) #Add back high precision lr weights
                 # update projection matrix and momentum low rank
                 q = zeropower_via_newtonschulz5(state["momentum_buffer_low_rank"].T, steps=5)
                 state["projection_matrix"].copy_(zeropower_via_newtonschulz5(momentum @ q, steps=5))
@@ -94,9 +122,10 @@ class LowRankNSMuonOptimizer(torch.optim.Optimizer):
                 s = max(1, update.size(-2) / update.size(-1))**0.5
                 update.addmm_(state["projection_matrix"], update_q, beta=0.0, alpha=s)
                 W.add_(update.reshape(W.shape), alpha=-group["lr"])
-                p.copy_(W)
-                # Recalculate low rank
-                torch.matmul(state["projection_matrix"].T.float(), W, out=state["low_rank_weight"])
+                if not isfloat32:
+                    copy_stochastic_(p, W)
+                    # Recalculate low rank
+                    torch.matmul(state["projection_matrix"].T.float(), W, out=state["low_rank_weight"])
         return loss
 
 class LayerwiseLowRankNSMuonOptimizer(LowRankNSMuonOptimizer):
