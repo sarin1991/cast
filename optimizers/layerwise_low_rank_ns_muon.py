@@ -1,4 +1,5 @@
 import torch
+import math
 
 
 @torch.no_grad()
@@ -116,7 +117,7 @@ class LowRankNSMuonOptimizer(torch.optim.Optimizer):
                 torch.matmul(state["projection_matrix"].T, momentum, out=state["momentum_buffer_low_rank"])
                 # remove eigen vals for update
                 update_q = zeropower_via_newtonschulz5(state["projection_matrix"].T @ update, steps=5)
-                s = max(1, update.size(-2) / update.size(-1))**0.5
+                s = 0.2 * math.sqrt(max(update.size(-2), update.size(-1)))
                 update.addmm_(state["projection_matrix"], update_q, beta=0.0, alpha=s)
                 W.add_(update.reshape(W.shape), alpha=-group["lr"])
                 if not isfloat32:

@@ -1,5 +1,5 @@
 import torch
-import torch.distributed as dist
+import math
 
 
 def zeropower_via_newtonschulz5(G, steps: int):
@@ -37,7 +37,7 @@ def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
     if update.ndim == 4: # for the case of conv filters
         update = update.view(len(update), -1)
     update = zeropower_via_newtonschulz5(update, steps=ns_steps)
-    update *= max(1, update.size(-2) / update.size(-1))**0.5
+    update *= 0.2 * math.sqrt(max(update.size(-2), update.size(-1)))
     return update
 
 class MuonOptimizer(torch.optim.Optimizer):
