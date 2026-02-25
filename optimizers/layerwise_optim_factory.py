@@ -3,6 +3,9 @@ from typing import Dict, Any, Type, Optional
 import torch
 
 # Register whatever implementations you want to swap between
+from .layerwise_low_rank_pe_wres_muon import (
+    LayerwiseLowRankPEWRESMuonOptimizer
+)
 from .layerwise_low_rank_pe_muon import (
     LayerwiseLowRankPEMuonOptimizer
 )
@@ -23,6 +26,7 @@ from .layerwise_adam import (
 )
 
 LAYERWISE_OPT_REGISTRY: Dict[str, Type[torch.optim.Optimizer]] = {
+    "layerwise_low_rank_pe_wres_muon": LayerwiseLowRankPEWRESMuonOptimizer,
     "layerwise_low_rank_pe_muon": LayerwiseLowRankPEMuonOptimizer,
     "layerwise_low_rank_ns_muon": LayerwiseLowRankNSMuonOptimizer,
     "layerwise_all_low_rank_muon": LayerwiseAllLowRankMuonOptimizer,
