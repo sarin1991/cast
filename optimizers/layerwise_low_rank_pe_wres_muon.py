@@ -163,7 +163,7 @@ class LowRankPEWRESMuonOptimizer(torch.optim.Optimizer):
                     momentum_buffer_low_rank_init = torch.randn((r, gradient.shape[1]), device=p.device, dtype=torch.bfloat16)
                     state["momentum_buffer_low_rank"] = momentum_buffer_low_rank_init
                     momentum = torch.zeros_like(p,dtype=torch.bfloat16)
-                    state["low_rank_weight_residual"] = torch.zeros_like(momentum,dtype=torch.float32)
+                    state["low_rank_weight_residual"] = torch.zeros_like(momentum_buffer_low_rank_init,dtype=torch.float32)
                 else:
                     momentum = decompress(state["projection_matrix"], state["momentum_buffer_low_rank"])
                 # Update momentum
