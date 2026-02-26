@@ -15,7 +15,7 @@ python /workspace/cast/main.py \
   --lr_scheduler_type cosine \
   --initial_sparsity_coefficient 1e-8 \
   --sparsity_coefficient_multiplier 1.05 \
-  --l2_target_low 0.01 \
+  --l2_target_low 0.03 \
   --l2_target_high 0.8 \
   --l2_target_cycle_length 2000 \
   --l2_target_dense_ratio 0.1 \
