@@ -19,5 +19,5 @@ python /workspace/cast/main.py \
   --l2_target_high 0.8 \
   --l2_target_cycle_length 2000 \
   --l2_target_dense_ratio 0.1 \
-  --layerwise_optim "layerwise_low_rank_muon" \
+  --layerwise_optim "layerwise_low_rank_pe_wres_muon" \
   --model_output_path "cast_checkpoint"
