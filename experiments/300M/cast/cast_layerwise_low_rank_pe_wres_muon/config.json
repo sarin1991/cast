@@ -9,7 +9,7 @@
     "hidden_size": 512,
     "initializer_range": 0.02,
     "intermediate_size": 65536,
-    "line_size": 2048,
+    "line_size": 1024,
     "max_position_embeddings": 32768,
     "model_type": "cast",
     "mlp_implementation": "triton_stream_compact",
