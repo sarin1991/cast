@@ -13,12 +13,6 @@ python main.py \
   --bf16 True \
   --save_steps 40000 \
   --lr_scheduler_type cosine \
-  --initial_sparsity_coefficient 1e-8 \
-  --sparsity_coefficient_multiplier 1.05 \
-  --l2_target_low 0.02 \
-  --l2_target_high 0.8 \
-  --l2_target_cycle_length 2000 \
-  --l2_target_dense_ratio 0.0 \
-  --layerwise_optim "layerwise_low_rank_muon" \
+  --layerwise_optim "layerwise_low_rank_pe_wres_muon" \
   --layerwise_optim_kwargs '{"rank":128}' \
   --model_output_path "cast_checkpoint_180m"

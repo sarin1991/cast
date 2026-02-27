@@ -5,7 +5,6 @@ from transformers import Trainer, AutoTokenizer, TrainingArguments, AutoModelFor
 from dataclasses import dataclass, field
 from typing import Tuple
 import transformers
-import math
 import json
 import deepspeed
 from optimizers.layerwise_optim_factory import create_layerwise_optimizer
@@ -18,31 +17,6 @@ def get_zero_stage(deepspeed_config_path):
     with open(deepspeed_config_path, 'r') as f:
         ds_config = json.load(f)
     return ds_config.get("zero_optimization", {}).get("stage", 0)
-
-def l2_target_scheduler(step, cycle_length=2000,
-                        low_target=0.2, high_target=0.6,
-                        dense_ratio=0.1):
-    cycle_num = step // cycle_length
-    position = step % cycle_length
-
-    dense_steps = int(cycle_length * dense_ratio)
-    half_dense = dense_steps / 2
-
-    if position < dense_steps:
-        if position < half_dense:
-            if cycle_num == 0:
-                return high_target
-            else:
-                normalized = position / half_dense
-                ramp = (1 - math.cos(math.pi * normalized)) / 2
-                return low_target + (high_target - low_target) * ramp
-        else:
-            position_in_second_half = position - half_dense
-            normalized = position_in_second_half / half_dense
-            ramp = (1 - math.cos(math.pi * normalized)) / 2
-            return high_target + (low_target - high_target) * ramp
-    else:
-        return low_target
 
 class ChunkedIterableDataset(IterableDataset):
     def __init__(self, dataset, tokenizer, block_size=512):
@@ -96,12 +70,6 @@ class CustomTrainingArguments(TrainingArguments):
     model_output_path: str = field(default=None)
     max_seq_length: int = field(default=8192)
     response_template: str = field(default="[/INST]")
-    initial_sparsity_coefficient: float = field(default=1e-8)
-    sparsity_coefficient_multiplier: float = field(default=1.2)
-    l2_target_low: float = field(default=0.2)
-    l2_target_high: float = field(default=0.6)
-    l2_target_cycle_length: int = field(default=2000)
-    l2_target_dense_ratio: float = field(default=0.1)
     layerwise_optim: str = field(
         default="none",
         metadata={"help": "Hook-based layerwise optimizer to use: none, layerwise_low_rank_muon, ..."}
@@ -152,29 +120,12 @@ class SparseTrainer(Trainer):
         self,
         *args,
         l2_act_metric: CustomMetricAccumulator,
-        l2_reg_loss_metric: CustomMetricAccumulator,
         ce_loss_metric: CustomMetricAccumulator,
-        l2_sparsity_coefficient_metric: CustomMetricAccumulator,
-        initial_sparsity_coefficient: float = 1e-8,
-        sparsity_coefficient_multiplier: float = 1.2,
-        l2_target_low: float = 0.2,
-        l2_target_high: float = 0.6,
-        l2_target_cycle_length: int = 2000,
-        l2_target_dense_ratio: float = 0.1,
         **kwargs,
     ):
         super().__init__(*args,**kwargs)
-        self.l2_sparsity_coefficient = initial_sparsity_coefficient
-        self.sparsity_coefficient_multiplier = sparsity_coefficient_multiplier
-        self.l2_target_low = l2_target_low
-        self.l2_target_high = l2_target_high
-        self.l2_target_cycle_length = l2_target_cycle_length
-        self.l2_target_dense_ratio = l2_target_dense_ratio
         self.l2_act_metric = l2_act_metric
-        self.l2_reg_loss_metric = l2_reg_loss_metric
         self.ce_loss_metric = ce_loss_metric
-        self.l2_sparsity_coefficient_metric = l2_sparsity_coefficient_metric
-        self.min_sparsity_coefficient = 1e-12
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """
@@ -184,7 +135,6 @@ class SparseTrainer(Trainer):
         ce_loss = outputs.loss
         self.ce_loss_metric.update(ce_loss.item())
         l2_act_local = outputs.l2_act_ratio.mean()
-        l2_reg_loss = outputs.l2_reg_loss.mean()
 
         # global act ratio
         l2_act = self.accelerator.reduce(
@@ -192,28 +142,8 @@ class SparseTrainer(Trainer):
         ).item()
         self.l2_act_metric.update(l2_act)
 
-        # global l2_reg_loss
-        global_l2_reg_loss = self.accelerator.reduce(
-            l2_reg_loss.to(self.accelerator.device), reduction='mean'
-        ).item()
-        self.l2_reg_loss_metric.update(global_l2_reg_loss)
-
-        current_target = l2_target_scheduler(
-            step=self.state.global_step,
-            cycle_length=self.l2_target_cycle_length,
-            low_target=self.l2_target_low,
-            high_target=self.l2_target_high,
-            dense_ratio=self.l2_target_dense_ratio
-        )
-
-        if l2_act>current_target:
-            self.l2_sparsity_coefficient = min((0.5 * ce_loss.item()) / l2_reg_loss.item(), self.l2_sparsity_coefficient * self.sparsity_coefficient_multiplier)
-        else:
-            self.l2_sparsity_coefficient = max(self.min_sparsity_coefficient, self.l2_sparsity_coefficient / self.sparsity_coefficient_multiplier)
-        self.l2_sparsity_coefficient_metric.update(self.l2_sparsity_coefficient)
-
         # total loss
-        loss = ce_loss + self.l2_sparsity_coefficient*l2_reg_loss
+        loss = ce_loss
 
         return (loss, outputs) if return_outputs else loss
 
@@ -336,16 +266,8 @@ def main():
 
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
     l2_act_metric = CustomMetricAccumulator()
-    l2_reg_loss_metric = CustomMetricAccumulator()
     ce_loss_metric = CustomMetricAccumulator()
-    l2_sparsity_coefficient_metric = CustomMetricAccumulator()
     trainer = SparseTrainer(
-        initial_sparsity_coefficient = training_args.initial_sparsity_coefficient,
-        sparsity_coefficient_multiplier = training_args.sparsity_coefficient_multiplier,
-        l2_target_low = training_args.l2_target_low,
-        l2_target_high = training_args.l2_target_high,
-        l2_target_cycle_length = training_args.l2_target_cycle_length,
-        l2_target_dense_ratio = training_args.l2_target_dense_ratio,
         model=model,
         args=training_args,
         train_dataset=iter_dataset,
@@ -353,14 +275,10 @@ def main():
         data_collator=data_collator,
         callbacks=[
                    MetricCallback(l2_act_metric,metric_name='l2_act'),
-                   MetricCallback(l2_reg_loss_metric,metric_name='l2_reg_loss'),
                    MetricCallback(ce_loss_metric,metric_name='ce_loss'),
-                   MetricCallback(l2_sparsity_coefficient_metric,metric_name='l2_sparsity_coefficient_metric',precision=8),
                    ],
         l2_act_metric=l2_act_metric,
-        l2_reg_loss_metric=l2_reg_loss_metric,
         ce_loss_metric=ce_loss_metric,
-        l2_sparsity_coefficient_metric=l2_sparsity_coefficient_metric,
         optimizers=optimizers,
     )
     trainer.train()
