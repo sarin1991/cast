@@ -2,11 +2,11 @@ python /workspace/cast/main.py \
   --pretrained_model "mistralai/Mistral-7B-Instruct-v0.3" \
   --config_path "config.json" \
   --output_dir "cast" \
-  --max_steps=40000 \
+  --max_steps=80000 \
   --gradient_checkpointing=True \
   --logging_steps=100 \
   --save_strategy "steps" \
-  --per_device_train_batch_size 1024 \
+  --per_device_train_batch_size 512 \
   --learning_rate 2e-4 \
   --logging_dir 'logs' \
   --max_seq_length 512 \
