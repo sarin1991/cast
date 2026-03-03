@@ -50,10 +50,12 @@ def compress_bf16_with_lr_lowbits_then_sr_(
     P32 = P.float()
 
     W_hi = fp32_trunc_to_bf16_grid(W_fp32)
-    W_lo = W_fp32 - W_hi
+    W_lo_neg = W_hi.sub_(W_fp32)
 
-    torch.matmul(P32.T, W_lo, out=W_lr)          # (r, n)
-    target = W_fp32 - (P32 @ W_lr)               # (m, n)
+    W_lr.addmm_(P32.T, W_lo_neg, beta=0.0, alpha=-1.0) # (r, n)
+
+    target = W_fp32
+    target.addmm_(P32, W_lr, beta=1.0, alpha=-1.0)               # (m, n)
 
     copy_stochastic_(W_bf16, target)             # SR fp32 -> bf16 (in-place)
 
@@ -163,7 +165,8 @@ class LowRankPEWRESMuonOptimizer(torch.optim.Optimizer):
                     momentum_buffer_low_rank_init = torch.randn((r, gradient.shape[1]), device=p.device, dtype=torch.bfloat16)
                     state["momentum_buffer_low_rank"] = momentum_buffer_low_rank_init
                     momentum = torch.zeros_like(p,dtype=torch.bfloat16)
-                    state["low_rank_weight_residual"] = torch.zeros_like(momentum_buffer_low_rank_init,dtype=torch.float32)
+                    if not isfloat32:
+                        state["low_rank_weight_residual"] = torch.zeros_like(momentum_buffer_low_rank_init,dtype=torch.float32)
                 else:
                     momentum = decompress(state["projection_matrix"], state["momentum_buffer_low_rank"])
                 # Update momentum
