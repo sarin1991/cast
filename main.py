@@ -315,7 +315,7 @@ def main():
                     lr=training_args.learning_rate,
                     kwargs_json=training_args.layerwise_optim_kwargs,
                 )
-                attach_multi_param_opt_hook(mlp_params, layerwise_optimizer)
+                attach_multi_param_opt_hook(mlp_params, layerwise_optimizer, training_args.print_memory_stats)
                 for param in mlp_params:
                     attach_clear_grad_after_accumulate(param)
                 layerwise_optimizers.append(layerwise_optimizer)
