@@ -11,6 +11,55 @@ from optimizers.layerwise_optim_factory import create_layerwise_optimizer
 from optimizers.hooks import attach_multi_param_opt_hook, attach_clear_grad_after_accumulate # Update usages to new modules as needed
 torch.backends.cuda.matmul.allow_tf32=True
 
+class MemoryCallback(TrainerCallback):
+    def _stats(self):
+        torch.cuda.synchronize()
+        a = torch.cuda.memory_allocated()/1024**3
+        r = torch.cuda.memory_reserved()/1024**3
+        return a, r
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        self.base_a, self.base_r = self._stats()
+
+    def on_pre_optimizer_step(self, args, state, control, **kwargs):
+        self.bwd_a, self.bwd_r = self._stats()
+        print(f"[step {state.global_step}] base a/r {self.base_a:.2f}/{self.base_r:.2f}G | "
+              f"after_bwd a/r {self.bwd_a:.2f}/{self.bwd_r:.2f}G", flush=True)
+
+    def on_optimizer_step(self, args, state, control, **kwargs):
+        opt_a, opt_r = self._stats()
+        print(f"[step {state.global_step}] after_opt a/r {opt_a:.2f}/{opt_r:.2f}G", flush=True)
+
+def print_memory_stats(state):
+    torch.cuda.synchronize()
+    a = torch.cuda.memory_allocated() / 1024**3
+    r = torch.cuda.memory_reserved()  / 1024**3
+    pa = torch.cuda.max_memory_allocated() / 1024**3
+    pr = torch.cuda.max_memory_reserved()  / 1024**3
+    print(f"[{state}] a/r {a:.2f}/{r:.2f}G | peak a/r {pa:.2f}/{pr:.2f}G", flush=True)
+
+def module_pre_fwd_hook(layer_idx):
+    def _pre(module, inputs):
+        torch.cuda.reset_peak_memory_stats()
+        print_memory_stats(f"fwd pre layer {layer_idx}")
+    return _pre
+
+def module_post_fwd_hook(layer_idx):
+    def _post(module, inputs, output):
+        print_memory_stats(f"fwd post layer {layer_idx}")
+    return _post
+
+def module_pre_bwd_hook(layer_idx):
+    def _pre(module, grad_output):
+        torch.cuda.reset_peak_memory_stats()
+        print_memory_stats(f"bwd pre layer {layer_idx}")
+    return _pre
+
+def module_post_bwd_hook(layer_idx):
+    def _post(module, grad_input, grad_output):
+        print_memory_stats(f"bwd post layer {layer_idx}")
+    return _post
+
 def get_zero_stage(deepspeed_config_path):
     if deepspeed_config_path is None:
         return 0
@@ -70,6 +119,10 @@ class CustomTrainingArguments(TrainingArguments):
     model_output_path: str = field(default=None)
     max_seq_length: int = field(default=8192)
     response_template: str = field(default="[/INST]")
+    print_memory_stats: bool = field(
+        default=False,
+        metadata={"help": "Print CUDA memory stats during training."}
+    )
     layerwise_optim: str = field(
         default="none",
         metadata={"help": "Hook-based layerwise optimizer to use: none, layerwise_low_rank_muon, ..."}
@@ -131,7 +184,13 @@ class SparseTrainer(Trainer):
         """
         How the loss is computed by SparseTrainer.
         """
+        if self.args.print_memory_stats:
+            torch.cuda.reset_peak_memory_stats()
+
         outputs = model(**inputs)
+        if self.args.print_memory_stats:
+            print_memory_stats(f'after_fwd {self.state.global_step}')
+        
         ce_loss = outputs.loss
         self.ce_loss_metric.update(ce_loss.item())
         l2_act_local = outputs.l2_act_ratio.mean()
@@ -201,13 +260,28 @@ def main():
             mlp_params_by_layer = []
             mlp_param_ids = set()
 
-            for decoder_layer in model.model.layers:
+            for layer_idx, decoder_layer in enumerate(model.model.layers):
                 mlp_params = []
                 for name, param in decoder_layer.named_parameters():
                     if ("up_proj" in name) or ("down_proj" in name):
                         mlp_params.append(param)
                         mlp_param_ids.add(id(param))
                 mlp_params_by_layer.append(mlp_params)
+                if training_args.print_memory_stats:
+                    decoder_layer.register_forward_pre_hook(module_pre_fwd_hook(layer_idx))
+                    decoder_layer.register_forward_hook(module_post_fwd_hook(layer_idx))
+                    decoder_layer.register_full_backward_pre_hook(module_pre_bwd_hook(layer_idx))
+                    decoder_layer.register_full_backward_hook(module_post_bwd_hook(layer_idx))
+                    # mlp
+                    decoder_layer.mlp.register_forward_pre_hook(module_pre_fwd_hook(f'mlp_{layer_idx}'))
+                    decoder_layer.mlp.register_forward_hook(module_post_fwd_hook(f'mlp_{layer_idx}'))
+                    decoder_layer.mlp.register_full_backward_pre_hook(module_pre_bwd_hook(f'mlp_{layer_idx}'))
+                    decoder_layer.mlp.register_full_backward_hook(module_post_bwd_hook(f'mlp_{layer_idx}'))
+                    # attn
+                    decoder_layer.self_attn.register_forward_pre_hook(module_pre_fwd_hook(f'attn_{layer_idx}'))
+                    decoder_layer.self_attn.register_forward_hook(module_post_fwd_hook(f'attn_{layer_idx}'))
+                    decoder_layer.self_attn.register_full_backward_pre_hook(module_pre_bwd_hook(f'attn_{layer_idx}'))
+                    decoder_layer.self_attn.register_full_backward_hook(module_post_bwd_hook(f'attn_{layer_idx}'))
 
             other_params = [
                 p for p in model.parameters()
@@ -267,16 +341,19 @@ def main():
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
     l2_act_metric = CustomMetricAccumulator()
     ce_loss_metric = CustomMetricAccumulator()
+    callbacks = [
+        MetricCallback(l2_act_metric,metric_name='l2_act'),
+        MetricCallback(ce_loss_metric,metric_name='ce_loss'),
+    ]
+    if training_args.print_memory_stats:
+        callbacks.append(MemoryCallback())
     trainer = SparseTrainer(
         model=model,
         args=training_args,
         train_dataset=iter_dataset,
         processing_class=tokenizer,
         data_collator=data_collator,
-        callbacks=[
-                   MetricCallback(l2_act_metric,metric_name='l2_act'),
-                   MetricCallback(ce_loss_metric,metric_name='ce_loss'),
-                   ],
+        callbacks=callbacks,
         l2_act_metric=l2_act_metric,
         ce_loss_metric=ce_loss_metric,
         optimizers=optimizers,
