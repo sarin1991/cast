@@ -14,5 +14,5 @@ python main.py \
   --save_steps 40000 \
   --lr_scheduler_type cosine \
   --layerwise_optim "layerwise_low_rank_pe_wres_muon" \
-  --layerwise_optim_kwargs '{"rank":128}' \
+  --layerwise_optim_kwargs '{"momentum_rank":128}' \
   --model_output_path "cast_checkpoint_180m"
