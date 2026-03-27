@@ -1,4 +1,5 @@
 import torch
+from .utils import LayerwiseOptimizerMixin
 
 def _orthonormalize_columns(X: torch.Tensor) -> torch.Tensor:
     # reduced QR in fp32 for stability
@@ -92,28 +93,5 @@ class AllLowRankMuonOptimizer(torch.optim.Optimizer):
                 torch.matmul(state["projection_matrix"].T.float(), W, out=state["weight_residual"])
         return loss
 
-class LayerwiseAllLowRankMuonOptimizer(AllLowRankMuonOptimizer):
-    """
-    Shell for a layerwise Muon optimizer.
-    Fill in the logic in future work.
-    """
-    def __init__(self, param_groups, **kwargs):
-        super().__init__(param_groups, **kwargs)
-    
-    @torch.no_grad()
-    def step_from_grads(self, params, grads):
-        """
-        params: iterable of nn.Parameter managed by this optimizer
-        grads: iterable of gradient tensors (same order/length), may contain None
-
-        Assigns provided grads to p.grad, then applies the normal Muon step.
-        """
-        for p, g in zip(params, grads):
-            if g is None:
-                p.grad = None
-            else:
-                p.grad = g.detach()
-        out = self.step()
-        for p in params:
-            p.grad = None
-        return out
+class LayerwiseAllLowRankMuonOptimizer(LayerwiseOptimizerMixin,AllLowRankMuonOptimizer):
+    pass

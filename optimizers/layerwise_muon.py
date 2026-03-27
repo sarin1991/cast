@@ -1,5 +1,6 @@
 import torch
 import math
+from .utils import LayerwiseOptimizerMixin
 
 
 def zeropower_via_newtonschulz5(G, steps: int):
@@ -70,24 +71,5 @@ class MuonOptimizer(torch.optim.Optimizer):
 
         return loss
 
-class LayerwiseMuonOptimizer(MuonOptimizer):
-    """
-    Shell for a layerwise Muon optimizer.
-    Fill in the logic in future work.
-    """
-    def __init__(self, param_groups, **kwargs):
-        super().__init__(param_groups, **kwargs)
-    
-    @torch.no_grad()
-    def step_from_grads(self, params, grads):
-        """
-        params: iterable of nn.Parameter managed by this optimizer
-        grads: iterable of gradient tensors (same order/length), may contain None
-
-        Assigns provided grads to p.grad, then applies the normal Muon step.
-        """
-        for p, g in zip(params, grads):
-            if g is None:
-                continue
-            p.grad = g.detach()
-        return self.step()
+class LayerwiseMuonOptimizer(LayerwiseOptimizerMixin,MuonOptimizer):
+    pass

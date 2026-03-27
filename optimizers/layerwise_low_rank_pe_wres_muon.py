@@ -1,5 +1,6 @@
 import torch
 import math
+from .utils import LayerwiseOptimizerMixin
 
 
 def fp32_trunc_to_bf16_grid(x_fp32: torch.Tensor) -> torch.Tensor:
@@ -186,28 +187,5 @@ class LowRankPEWRESMuonOptimizer(torch.optim.Optimizer):
                     compress_bf16_with_lr_lowbits_then_sr_(W, p, state["projection_matrix"], state["low_rank_weight_residual"])                
         return loss
 
-class LayerwiseLowRankPEWRESMuonOptimizer(LowRankPEWRESMuonOptimizer):
-    """
-    Shell for a layerwise Muon optimizer.
-    Fill in the logic in future work.
-    """
-    def __init__(self, param_groups, **kwargs):
-        super().__init__(param_groups, **kwargs)
-    
-    @torch.no_grad()
-    def step_from_grads(self, params, grads):
-        """
-        params: iterable of nn.Parameter managed by this optimizer
-        grads: iterable of gradient tensors (same order/length), may contain None
-
-        Assigns provided grads to p.grad, then applies the normal Muon step.
-        """
-        for p, g in zip(params, grads):
-            if g is None:
-                p.grad = None
-            else:
-                p.grad = g.detach()
-        out = self.step()
-        for p in params:
-            p.grad = None
-        return out
+class LayerwiseLowRankPEWRESMuonOptimizer(LayerwiseOptimizerMixin,LowRankPEWRESMuonOptimizer):
+    pass
