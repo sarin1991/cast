@@ -1,0 +1,17 @@
+torchrun --nproc_per_node=2 main_pipeline.py \
+  --pretrained_model "mistralai/Mistral-7B-Instruct-v0.3" \
+  --config_path "config_cast_180m.json" \
+  --output_dir "cast_180m_pp" \
+  --max_steps 40000 \
+  --gradient_checkpointing False \
+  --logging_steps 100 \
+  --save_strategy "steps" \
+  --per_device_train_batch_size 1024 \
+  --learning_rate 2e-4 \
+  --logging_dir "logs_pp" \
+  --max_seq_length 512 \
+  --bf16 True \
+  --save_steps 40000 \
+  --lr_scheduler_type cosine \
+  --model_output_path "cast_checkpoint_180m_pp" \
+  --pipeline_n_microbatches 4
