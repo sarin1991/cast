@@ -13,5 +13,9 @@ torchrun --nproc_per_node=2 main_pipeline.py \
   --bf16 True \
   --save_steps 40000 \
   --lr_scheduler_type cosine \
+  --optimizer "adamw" \
+  --optimizer_kwargs '{"weight_decay":0.1}' \
+  --mlp_optimizer "low_rank_pe_wres_muon" \
+  --mlp_optimizer_kwargs '{"momentum_rank":128}' \
   --model_output_path "cast_checkpoint_180m_pp" \
   --pipeline_n_microbatches 4

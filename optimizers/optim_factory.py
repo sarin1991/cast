@@ -4,22 +4,22 @@ import torch
 
 # Register whatever implementations you want to swap between
 from .layerwise_low_rank_pe_wres_muon import (
-    LayerwiseLowRankPEWRESMuonOptimizer
+    LayerwiseLowRankPEWRESMuonOptimizer, LowRankPEWRESMuonOptimizer
 )
 from .layerwise_low_rank_pe_muon import (
-    LayerwiseLowRankPEMuonOptimizer
+    LayerwiseLowRankPEMuonOptimizer, LowRankPEMuonOptimizer
 )
 from .layerwise_low_rank_ns_muon import (
-    LayerwiseLowRankNSMuonOptimizer
+    LayerwiseLowRankNSMuonOptimizer, LowRankNSMuonOptimizer
 )
 from .layerwise_all_low_rank_muon import (
-    LayerwiseAllLowRankMuonOptimizer
+    LayerwiseAllLowRankMuonOptimizer, AllLowRankMuonOptimizer
 )
 from .layerwise_low_rank_muon import (
-    LayerwiseLowRankMuonOptimizer
+    LayerwiseLowRankMuonOptimizer, LowRankMuonOptimizer
 )
 from .layerwise_muon import (
-    LayerwiseMuonOptimizer
+    LayerwiseMuonOptimizer, MuonOptimizer
 )
 from .layerwise_adam import (
     LayerwiseAdamOptimizer
@@ -33,10 +33,17 @@ LAYERWISE_OPT_REGISTRY: Dict[str, Type[torch.optim.Optimizer]] = {
     "layerwise_low_rank_muon": LayerwiseLowRankMuonOptimizer,
     "layerwise_muon": LayerwiseMuonOptimizer,
     "layerwise_adam": LayerwiseAdamOptimizer,
+    "low_rank_pe_wres_muon": LowRankPEWRESMuonOptimizer,
+    "low_rank_pe_muon": LowRankPEMuonOptimizer,
+    "low_rank_ns_muon": LowRankNSMuonOptimizer,
+    "all_low_rank_muon": AllLowRankMuonOptimizer,
+    "low_rank_muon": LowRankMuonOptimizer,
+    "muon": MuonOptimizer,
+    "adam": torch.optim.Adam,
     # "my_other_opt": MyOtherHookOptimizer,
 }
 
-def create_layerwise_optimizer(
+def create_optimizer(
     name: str,
     param_groups,
     lr: float,

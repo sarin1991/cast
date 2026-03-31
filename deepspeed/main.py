@@ -5,9 +5,10 @@ from transformers import Trainer, AutoTokenizer, TrainingArguments, AutoModelFor
 from dataclasses import dataclass, field
 from typing import Tuple
 import transformers
-from optimizers.optim_factory import create_optimizer
+import json
+import deepspeed
+from optimizers.layerwise_optim_factory import create_layerwise_optimizer
 from optimizers.hooks import attach_multi_param_opt_hook, attach_clear_grad_after_accumulate # Update usages to new modules as needed
-from optimizers.multi_optimizer import MultiOptimizer
 torch.backends.cuda.matmul.allow_tf32=True
 
 class MemoryCallback(TrainerCallback):
@@ -59,6 +60,12 @@ def module_post_bwd_hook(layer_idx):
         print_memory_stats(f"bwd post layer {layer_idx}")
     return _post
 
+def get_zero_stage(deepspeed_config_path):
+    if deepspeed_config_path is None:
+        return 0
+    with open(deepspeed_config_path, 'r') as f:
+        ds_config = json.load(f)
+    return ds_config.get("zero_optimization", {}).get("stage", 0)
 
 class ChunkedIterableDataset(IterableDataset):
     def __init__(self, dataset, tokenizer, block_size=512):
@@ -116,21 +123,13 @@ class CustomTrainingArguments(TrainingArguments):
         default=False,
         metadata={"help": "Print CUDA memory stats during training."}
     )
-    optimizer: str = field(
-        default="adamw",
-        metadata={"help": "Optimizer for all params, or for non-MLP params when mlp_optimizer is enabled."}
-    )
-    optimizer_kwargs: str = field(
-        default="{}",
-        metadata={"help": "JSON dict of kwargs for optimizer."}
-    )
-    mlp_optimizer: str = field(
+    layerwise_optim: str = field(
         default="none",
-        metadata={"help": "optimizer for per-layer MLP up_proj/down_proj params."}
+        metadata={"help": "Hook-based layerwise optimizer to use: none, layerwise_low_rank_muon, ..."}
     )
-    mlp_optimizer_kwargs: str = field(
+    layerwise_optim_kwargs: str = field(
         default="{}",
-        metadata={"help": "JSON dict of kwargs for mlp_optimizer."}
+        metadata={"help": "JSON dict of kwargs for the hook optimizer, e.g. '{\"rank\":8}'"}
     )
     
 
@@ -207,85 +206,6 @@ class SparseTrainer(Trainer):
 
         return (loss, outputs) if return_outputs else loss
 
-def partition_params(model,training_args):
-    mlp_params_by_layer = []
-    mlp_param_ids = set()
-
-    for layer_key in sorted(model.model.layers.keys(), key=int):
-        decoder_layer = model.model.layers[layer_key]
-        layer_idx = int(layer_key)
-        mlp_params = []
-        for name, param in decoder_layer.named_parameters():
-            if ("up_proj" in name) or ("down_proj" in name):
-                mlp_params.append(param)
-                mlp_param_ids.add(id(param))
-        mlp_params_by_layer.append(mlp_params)
-        if training_args.print_memory_stats:
-            decoder_layer.register_forward_pre_hook(module_pre_fwd_hook(layer_idx))
-            decoder_layer.register_forward_hook(module_post_fwd_hook(layer_idx))
-            decoder_layer.register_full_backward_pre_hook(module_pre_bwd_hook(layer_idx))
-            decoder_layer.register_full_backward_hook(module_post_bwd_hook(layer_idx))
-            # mlp
-            decoder_layer.mlp.register_forward_pre_hook(module_pre_fwd_hook(f'mlp_{layer_idx}'))
-            decoder_layer.mlp.register_forward_hook(module_post_fwd_hook(f'mlp_{layer_idx}'))
-            decoder_layer.mlp.register_full_backward_pre_hook(module_pre_bwd_hook(f'mlp_{layer_idx}'))
-            decoder_layer.mlp.register_full_backward_hook(module_post_bwd_hook(f'mlp_{layer_idx}'))
-            # attn
-            decoder_layer.self_attn.register_forward_pre_hook(module_pre_fwd_hook(f'attn_{layer_idx}'))
-            decoder_layer.self_attn.register_forward_hook(module_post_fwd_hook(f'attn_{layer_idx}'))
-            decoder_layer.self_attn.register_full_backward_pre_hook(module_pre_bwd_hook(f'attn_{layer_idx}'))
-            decoder_layer.self_attn.register_full_backward_hook(module_post_bwd_hook(f'attn_{layer_idx}'))
-
-    other_params = [
-        p for p in model.parameters()
-        if p.requires_grad and (id(p) not in mlp_param_ids)
-    ]
-    return mlp_params_by_layer, other_params
-
-def build_optimizer(model,training_args):
-    build_param_groups = lambda params: [{"params": params}]
-    mlp_params_by_layer, other_params = partition_params(model,training_args)
-    print(
-            f"Found {sum(len(x) for x in mlp_params_by_layer)} params for mlp optimizer "
-            f"and {len(other_params)} for rest."
-        )
-    if training_args.mlp_optimizer not in (None, "", "none"):
-        is_layerwise_optim = 'layerwise_' in training_args.mlp_optimizer
-        mlp_optimizers = []
-        for mlp_params in mlp_params_by_layer:
-            mlp_optimizer = create_optimizer(
-                name=training_args.mlp_optimizer,
-                param_groups=build_param_groups(mlp_params),
-                lr=training_args.learning_rate,
-                kwargs_json=training_args.mlp_optimizer_kwargs,
-            )
-            if is_layerwise_optim:
-                attach_multi_param_opt_hook(mlp_params, mlp_optimizer, training_args.print_memory_stats)
-                for param in mlp_params:
-                    attach_clear_grad_after_accumulate(param)
-            mlp_optimizers.append(mlp_optimizer)
-        non_mlp_optimizer = create_optimizer(
-            name=training_args.optimizer,
-            param_groups=build_param_groups(other_params),
-            lr=training_args.learning_rate,
-            kwargs_json=training_args.optimizer_kwargs,
-        )
-        optimizer = MultiOptimizer(mlp_optimizers + [non_mlp_optimizer])
-    else:
-        optimizer = create_optimizer(
-            name=training_args.optimizer,
-            param_groups=build_param_groups([p for p in model.parameters() if p.requires_grad]),
-            lr=training_args.learning_rate,
-            kwargs_json=training_args.optimizer_kwargs,
-        )
-    cosine_scheduler = get_cosine_schedule_with_warmup(
-        optimizer=optimizer,
-        num_warmup_steps=training_args.warmup_steps,
-        num_training_steps=training_args.max_steps,
-    )
-    return optimizer, cosine_scheduler
-
-
 def main():
     parser = transformers.HfArgumentParser(
         (CustomTrainingArguments)
@@ -302,16 +222,122 @@ def main():
     train_dataset = load_dataset("HuggingFaceTB/cosmopedia", "web_samples_v1", split="train", streaming=True)
     iter_dataset = ChunkedIterableDataset(train_dataset, tokenizer, block_size=training_args.max_seq_length)
 
-    if training_args.config_path:
-        config = AutoConfig.from_pretrained(training_args.config_path,attn_implementation="sdpa")
-        model = AutoModelForCausalLM.from_config(config,attn_implementation="sdpa")
+    zero_stage = get_zero_stage(training_args.deepspeed)
+    optimizers = (None, None)
+    # Optimized model initialization for DeepSpeed ZeRO Stage 3
+    if zero_stage == 3:
+        # Read the full config and extract only what zero.Init needs
+        with open(training_args.deepspeed, 'r') as f:
+            full_config = json.load(f)
+        
+        # Create minimal config for zero.Init with required batch size
+        zero_init_config = {
+            "train_micro_batch_size_per_gpu": 1,  # Dummy value, Trainer will override
+            "zero_optimization": full_config.get("zero_optimization", {}),
+            "bf16": full_config.get("bf16", {}),
+            "fp16": full_config.get("fp16", {})
+        }
+        
+        # Use config_dict_or_path parameter (not deprecated 'config')
+        with deepspeed.zero.Init(config_dict_or_path=zero_init_config):
+            if training_args.config_path:
+                config = AutoConfig.from_pretrained(training_args.config_path, attn_implementation="sdpa")
+                model = AutoModelForCausalLM.from_config(config, attn_implementation="sdpa")
+            else:
+                model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model, attn_implementation="sdpa")
     else:
-        model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model,attn_implementation="sdpa")
-    model.to('cuda')
-
-    optimizer, cosine_scheduler = build_optimizer(model,training_args)
-    optimizers=(optimizer, cosine_scheduler)
+        # Standard initialization without DeepSpeed
+        if training_args.config_path:
+            config = AutoConfig.from_pretrained(training_args.config_path,attn_implementation="sdpa")
+            model = AutoModelForCausalLM.from_config(config,attn_implementation="sdpa")
+        else:
+            model = AutoModelForCausalLM.from_pretrained(training_args.pretrained_model,attn_implementation="sdpa")
+        model.to('cuda')
     
+        # Custom layerwise optimizer
+        if training_args.layerwise_optim not in (None, "", "none"):
+            # --- Partition Model Parameters (robust: uses param identity, not names) ---
+            mlp_params_by_layer = []
+            mlp_param_ids = set()
+
+            for layer_idx, decoder_layer in enumerate(model.model.layers):
+                mlp_params = []
+                for name, param in decoder_layer.named_parameters():
+                    if ("up_proj" in name) or ("down_proj" in name):
+                        mlp_params.append(param)
+                        mlp_param_ids.add(id(param))
+                mlp_params_by_layer.append(mlp_params)
+                if training_args.print_memory_stats:
+                    decoder_layer.register_forward_pre_hook(module_pre_fwd_hook(layer_idx))
+                    decoder_layer.register_forward_hook(module_post_fwd_hook(layer_idx))
+                    decoder_layer.register_full_backward_pre_hook(module_pre_bwd_hook(layer_idx))
+                    decoder_layer.register_full_backward_hook(module_post_bwd_hook(layer_idx))
+                    # mlp
+                    decoder_layer.mlp.register_forward_pre_hook(module_pre_fwd_hook(f'mlp_{layer_idx}'))
+                    decoder_layer.mlp.register_forward_hook(module_post_fwd_hook(f'mlp_{layer_idx}'))
+                    decoder_layer.mlp.register_full_backward_pre_hook(module_pre_bwd_hook(f'mlp_{layer_idx}'))
+                    decoder_layer.mlp.register_full_backward_hook(module_post_bwd_hook(f'mlp_{layer_idx}'))
+                    # attn
+                    decoder_layer.self_attn.register_forward_pre_hook(module_pre_fwd_hook(f'attn_{layer_idx}'))
+                    decoder_layer.self_attn.register_forward_hook(module_post_fwd_hook(f'attn_{layer_idx}'))
+                    decoder_layer.self_attn.register_full_backward_pre_hook(module_pre_bwd_hook(f'attn_{layer_idx}'))
+                    decoder_layer.self_attn.register_full_backward_hook(module_post_bwd_hook(f'attn_{layer_idx}'))
+
+            other_params = [
+                p for p in model.parameters()
+                if p.requires_grad and (id(p) not in mlp_param_ids)
+            ]
+
+            print(
+                f"Found {sum(len(x) for x in mlp_params_by_layer)} params for layerwise optimizer "
+                f"and {len(other_params)} for AdamW."
+            )
+
+            # --- Create the Two Optimizers ---
+            # Note: You need bitsandbytes installed for the 8-bit optimizer.
+            layerwise_optimizers = []
+            for layer_idx, mlp_params in enumerate(mlp_params_by_layer):
+                if len(mlp_params) != 2:
+                    raise RuntimeError(
+                        f"Layer {layer_idx}: expected 2 params (up_proj/down_proj), found {len(mlp_params)}. "
+                        "Check your name filter or model architecture."
+                    )
+
+                param_groups = [
+                    {
+                        'params': mlp_params,
+                    }
+                ]
+
+                layerwise_optimizer = create_layerwise_optimizer(
+                    name=training_args.layerwise_optim,
+                    param_groups=param_groups,
+                    lr=training_args.learning_rate,
+                    kwargs_json=training_args.layerwise_optim_kwargs,
+                )
+                attach_multi_param_opt_hook(mlp_params, layerwise_optimizer, training_args.print_memory_stats)
+                for param in mlp_params:
+                    attach_clear_grad_after_accumulate(param)
+                layerwise_optimizers.append(layerwise_optimizer)
+
+            all_mlp_params = []
+            for mlp_params in mlp_params_by_layer:
+                all_mlp_params.extend(mlp_params)
+
+            adamw_optimizer = torch.optim.AdamW(
+                other_params,
+                lr=training_args.learning_rate, # Also controlled by the scheduler
+            )
+
+            # --- Create the Cosine Scheduler ---
+            # The scheduler will control the learning rate for BOTH optimizers.
+            cosine_scheduler = get_cosine_schedule_with_warmup(
+                optimizer=adamw_optimizer,
+                num_warmup_steps=training_args.warmup_steps,
+                num_training_steps=training_args.max_steps,
+            )
+            optimizers=(adamw_optimizer, cosine_scheduler)
+
     data_collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
     l2_act_metric = CustomMetricAccumulator()
     ce_loss_metric = CustomMetricAccumulator()

@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import Tuple
 import transformers
 from torch.distributed.pipelining import PipelineStage, ScheduleGPipe
+from optimizers.optim_factory import create_optimizer
+from optimizers.multi_optimizer import MultiOptimizer
 torch.backends.cuda.matmul.allow_tf32=True
 
 RANK = 0
@@ -133,6 +135,22 @@ class CustomTrainingArguments(TrainingArguments):
         default=4,
         metadata={"help": "Number of pipeline microbatches."}
     )
+    optimizer: str = field(
+        default="adamw",
+        metadata={"help": "Optimizer for all params, or for non-MLP params when mlp_optimizer is enabled."}
+    )
+    optimizer_kwargs: str = field(
+        default="{}",
+        metadata={"help": "JSON dict of kwargs for optimizer."}
+    )
+    mlp_optimizer: str = field(
+        default="none",
+        metadata={"help": "optimizer for per-layer MLP up_proj/down_proj params."}
+    )
+    mlp_optimizer_kwargs: str = field(
+        default="{}",
+        metadata={"help": "JSON dict of kwargs for mlp_optimizer."}
+    )
 
 class CustomMetricAccumulator:
     def __init__(self):
@@ -248,6 +266,82 @@ def prune_model_for_stage(model):
 
     return model
 
+def partition_params(model,training_args):
+    mlp_params_by_layer = []
+    mlp_param_ids = set()
+
+    for layer_key in sorted(model.model.layers.keys(), key=int):
+        decoder_layer = model.model.layers[layer_key]
+        layer_idx = int(layer_key)
+        mlp_params = []
+        for name, param in decoder_layer.named_parameters():
+            if ("up_proj" in name) or ("down_proj" in name):
+                mlp_params.append(param)
+                mlp_param_ids.add(id(param))
+        mlp_params_by_layer.append(mlp_params)
+        if training_args.print_memory_stats:
+            decoder_layer.register_forward_pre_hook(module_pre_fwd_hook(layer_idx))
+            decoder_layer.register_forward_hook(module_post_fwd_hook(layer_idx))
+            decoder_layer.register_full_backward_pre_hook(module_pre_bwd_hook(layer_idx))
+            decoder_layer.register_full_backward_hook(module_post_bwd_hook(layer_idx))
+            # mlp
+            decoder_layer.mlp.register_forward_pre_hook(module_pre_fwd_hook(f'mlp_{layer_idx}'))
+            decoder_layer.mlp.register_forward_hook(module_post_fwd_hook(f'mlp_{layer_idx}'))
+            decoder_layer.mlp.register_full_backward_pre_hook(module_pre_bwd_hook(f'mlp_{layer_idx}'))
+            decoder_layer.mlp.register_full_backward_hook(module_post_bwd_hook(f'mlp_{layer_idx}'))
+            # attn
+            decoder_layer.self_attn.register_forward_pre_hook(module_pre_fwd_hook(f'attn_{layer_idx}'))
+            decoder_layer.self_attn.register_forward_hook(module_post_fwd_hook(f'attn_{layer_idx}'))
+            decoder_layer.self_attn.register_full_backward_pre_hook(module_pre_bwd_hook(f'attn_{layer_idx}'))
+            decoder_layer.self_attn.register_full_backward_hook(module_post_bwd_hook(f'attn_{layer_idx}'))
+
+    other_params = [
+        p for p in model.parameters()
+        if p.requires_grad and (id(p) not in mlp_param_ids)
+    ]
+    return mlp_params_by_layer, other_params
+
+def build_optimizer(model,training_args):
+    build_param_groups = lambda params: [{"params": params}]
+    mlp_params_by_layer, other_params = partition_params(model,training_args)
+    print(
+            f"Found {sum(len(x) for x in mlp_params_by_layer)} params for mlp optimizer "
+            f"and {len(other_params)} for rest."
+        )
+    if training_args.mlp_optimizer not in (None, "", "none"):
+        is_layerwise_optim = 'layerwise_' in training_args.mlp_optimizer
+        if is_layerwise_optim:
+            raise ValueError("layerwise mlp_optimizer is not supported with pipeline parallelism")
+        mlp_optimizers = []
+        for mlp_params in mlp_params_by_layer:
+            mlp_optimizer = create_optimizer(
+                name=training_args.mlp_optimizer,
+                param_groups=build_param_groups(mlp_params),
+                lr=training_args.learning_rate,
+                kwargs_json=training_args.mlp_optimizer_kwargs,
+            )
+            mlp_optimizers.append(mlp_optimizer)
+        non_mlp_optimizer = create_optimizer(
+            name=training_args.optimizer,
+            param_groups=build_param_groups(other_params),
+            lr=training_args.learning_rate,
+            kwargs_json=training_args.optimizer_kwargs,
+        )
+        optimizer = MultiOptimizer(mlp_optimizers + [non_mlp_optimizer])
+    else:
+        optimizer = create_optimizer(
+            name=training_args.optimizer,
+            param_groups=build_param_groups([p for p in model.parameters() if p.requires_grad]),
+            lr=training_args.learning_rate,
+            kwargs_json=training_args.optimizer_kwargs,
+        )
+    cosine_scheduler = get_cosine_schedule_with_warmup(
+        optimizer=optimizer,
+        num_warmup_steps=training_args.warmup_steps,
+        num_training_steps=training_args.max_steps,
+    )
+    return optimizer, cosine_scheduler
+
 def main():
     init_distributed()
 
@@ -275,32 +369,7 @@ def main():
     model = prune_model_for_stage(model)
     model.to(f'cuda:{LOCAL_RANK}')
 
-    if training_args.print_memory_stats:
-        for layer_key in sorted(model.model.layers.keys(), key=int):
-            decoder_layer = model.model.layers[layer_key]
-            layer_idx = int(layer_key)
-            decoder_layer.register_forward_pre_hook(module_pre_fwd_hook(layer_idx))
-            decoder_layer.register_forward_hook(module_post_fwd_hook(layer_idx))
-            decoder_layer.register_full_backward_pre_hook(module_pre_bwd_hook(layer_idx))
-            decoder_layer.register_full_backward_hook(module_post_bwd_hook(layer_idx))
-            decoder_layer.mlp.register_forward_pre_hook(module_pre_fwd_hook(f'mlp_{layer_idx}'))
-            decoder_layer.mlp.register_forward_hook(module_post_fwd_hook(f'mlp_{layer_idx}'))
-            decoder_layer.mlp.register_full_backward_pre_hook(module_pre_bwd_hook(f'mlp_{layer_idx}'))
-            decoder_layer.mlp.register_full_backward_hook(module_post_bwd_hook(f'mlp_{layer_idx}'))
-            decoder_layer.self_attn.register_forward_pre_hook(module_pre_fwd_hook(f'attn_{layer_idx}'))
-            decoder_layer.self_attn.register_forward_hook(module_post_fwd_hook(f'attn_{layer_idx}'))
-            decoder_layer.self_attn.register_full_backward_pre_hook(module_pre_bwd_hook(f'attn_{layer_idx}'))
-            decoder_layer.self_attn.register_full_backward_hook(module_post_bwd_hook(f'attn_{layer_idx}'))
-
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=training_args.learning_rate,
-    )
-    cosine_scheduler = get_cosine_schedule_with_warmup(
-        optimizer=optimizer,
-        num_warmup_steps=training_args.warmup_steps,
-        num_training_steps=training_args.max_steps,
-    )
+    optimizer, cosine_scheduler = build_optimizer(model,training_args)
     optimizers=(optimizer, cosine_scheduler)
 
     l2_act_metric = CustomMetricAccumulator()

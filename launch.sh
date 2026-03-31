@@ -2,17 +2,19 @@ python main.py \
   --pretrained_model "mistralai/Mistral-7B-Instruct-v0.3" \
   --config_path "config_cast_180m.json" \
   --output_dir "cast_180m" \
-  --max_steps=40000 \
-  --gradient_checkpointing=True \
-  --logging_steps=100 \
+  --max_steps 40000 \
+  --gradient_checkpointing True \
+  --logging_steps 100 \
   --save_strategy "steps" \
   --per_device_train_batch_size 1024 \
   --learning_rate 2e-4 \
-  --logging_dir 'logs' \
+  --logging_dir "logs" \
   --max_seq_length 512 \
   --bf16 True \
   --save_steps 40000 \
   --lr_scheduler_type cosine \
-  --layerwise_optim "layerwise_low_rank_pe_wres_muon" \
-  --layerwise_optim_kwargs '{"momentum_rank":128}' \
+  --optimizer "adamw" \
+  --optimizer_kwargs '{"weight_decay":0.1}' \
+  --mlp_optimizer "layerwise_low_rank_pe_wres_muon" \
+  --mlp_optimizer_kwargs '{"momentum_rank":128}' \
   --model_output_path "cast_checkpoint_180m"
