@@ -1,18 +1,20 @@
-python main.py \
+torchrun --nproc_per_node=2 main_pipeline.py \
   --pretrained_model "mistralai/Mistral-7B-Instruct-v0.3" \
   --config_path "config.json" \
-  --output_dir "dense" \
-  --max_steps 80000 \
-  --gradient_checkpointing True \
+  --output_dir "cast_pp" \
+  --max_steps 620000 \
+  --gradient_checkpointing False \
   --logging_steps 100 \
   --save_strategy "steps" \
   --per_device_train_batch_size 512 \
   --learning_rate 2e-4 \
-  --logging_dir "logs" \
+  --logging_dir "logs_pp" \
   --max_seq_length 512 \
   --bf16 True \
-  --save_steps 40000 \
+  --save_steps 100000 \
   --lr_scheduler_type cosine \
   --optimizer "adamw" \
   --optimizer_kwargs '{"weight_decay":0.1}' \
-  --model_output_path "dense_checkpoint"
+  --mlp_optimizer "low_rank_pe_wres_muon" \
+  --model_output_path "cast_checkpoint_pp" \
+  --pipeline_n_microbatches 4
