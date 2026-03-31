@@ -1,4 +1,4 @@
-python main.py \
+python /workspace/cast/main.py \
   --pretrained_model "mistralai/Mistral-7B-Instruct-v0.3" \
   --config_path "config.json" \
   --output_dir "dense" \
