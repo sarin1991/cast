@@ -1,4 +1,4 @@
-torchrun --nproc_per_node=2 main_pipeline.py \
+torchrun --nproc_per_node=2 /workspace/cast/main_pipeline.py \
   --pretrained_model "mistralai/Mistral-7B-Instruct-v0.3" \
   --config_path "config_cast_180m.json" \
   --output_dir "cast_180m_pp" \
