@@ -40,6 +40,7 @@ LAYERWISE_OPT_REGISTRY: Dict[str, Type[torch.optim.Optimizer]] = {
     "low_rank_muon": LowRankMuonOptimizer,
     "muon": MuonOptimizer,
     "adam": torch.optim.Adam,
+    "adamw": torch.optim.AdamW,
     # "my_other_opt": MyOtherHookOptimizer,
 }
 
